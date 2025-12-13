@@ -46,6 +46,9 @@ query_expander = OllamaQueryExpander(ollama_host=OLLAMA_HOST, model="llama3.2:3b
 # ----------------------
 # Pydantic models
 # ----------------------
+class SearchRequest(BaseModel):
+    query: str
+
 class SearchResponse(BaseModel):
     status: str
     original_query: str
@@ -82,7 +85,63 @@ async def health():
     return results
 
 # ----------------------
-# Web search endpoint
+# POST endpoint for frontend
+# ----------------------
+@app.post("/search")
+async def search_post(request: SearchRequest):
+    """
+    POST endpoint for frontend to send search queries
+    """
+    logger.info(f"Received POST /search request: query='{request.query}'")
+    try:
+        start_time = asyncio.get_event_loop().time()
+
+        # 查詢擴展（已重新啟用）
+        logger.info(f"📝 開始查詢擴展...")
+        expanded_queries = await query_expander.expand(request.query)
+        logger.info(f"✅ 查詢擴展完成: {expanded_queries}")
+        
+        all_queries = [request.query] + expanded_queries
+        logger.info(f"🔍 將執行 {len(all_queries)} 個查詢: {all_queries}")
+
+        # Search with all queries
+        all_results = []
+        seen_urls = set()
+        for idx, query in enumerate(all_queries):
+            # 在每個查詢之間添加延遲，避免 rate limit
+            if idx > 0:
+                await asyncio.sleep(1.5)
+            
+            results = await search_engine.search(query)
+            logger.info(f"Results for '{query}': {len(results)} items")
+            for r in results:
+                url = r.get("url") or r.get("href") or ""
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_results.append(r)
+            if len(all_results) >= search_engine.max_results:
+                break
+
+        final = all_results[:search_engine.max_results]
+        execution_time = asyncio.get_event_loop().time() - start_time
+        logger.info(f"Search completed: total_results={len(final)}, execution_time={execution_time:.3f}s")
+
+        return {
+            "status": "success",
+            "original_query": request.query,
+            "expanded_queries": expanded_queries,
+            "total_queries": len(all_queries),
+            "results": final,
+            "total_results": len(final),
+            "execution_time": execution_time,
+            "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        }
+    except Exception as e:
+        logger.exception("POST /search endpoint error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------
+# Web search endpoint (GET - 保留原有功能)
 # ----------------------
 @app.get("/search", response_model=SearchResponse)
 async def search(
@@ -90,7 +149,7 @@ async def search(
     expand: bool = Query(True, description="Whether to expand query using Ollama"),
     max_results: Optional[int] = Query(None, description="Limit results (overrides default)")
 ):
-    logger.info(f"Received search request: q='{q}', expand={expand}, max_results={max_results}")
+    logger.info(f"Received GET /search request: q='{q}', expand={expand}, max_results={max_results}")
     try:
         if max_results:
             search_engine.max_results = max_results
@@ -105,7 +164,11 @@ async def search(
 
         all_results = []
         seen_urls = set()
-        for query in all_queries:
+        for idx, query in enumerate(all_queries):
+            # 在每個查詢之間添加延遲，避免 rate limit
+            if idx > 0:
+                await asyncio.sleep(1.5)
+                
             results = await search_engine.search(query)
             logger.info(f"Results for '{query}': {len(results)} items")
             for r in results:
@@ -131,7 +194,7 @@ async def search(
             "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
         }
     except Exception as e:
-        logger.exception("Search endpoint error")
+        logger.exception("GET /search endpoint error")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ----------------------
