@@ -87,7 +87,7 @@ class AnalysisAgent:
             logger.info(f"   📁 資料庫中找到 {db_entities_count} 個相關實體")
             
             # 步驟 2: 基本判斷 - 如果資料庫幾乎沒有資料，直接判定不足
-            if db_entities_count < 6:
+            if db_entities_count < 10:
                 logger.info(f"   ⚠️ 資料庫實體不足 3 個，判定資料不足")
                 return {
                     "sufficient": False,

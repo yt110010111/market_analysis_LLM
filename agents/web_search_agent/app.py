@@ -158,7 +158,7 @@ async def search_post(request: SearchRequest):
                 orchestrate_response = requests.post(
                     f"{ANALYSIS_AGENT_URL}/orchestrate",
                     json=analysis_data.get("details"),
-                    timeout=60
+                    timeout=180
                 )
                 
                 if orchestrate_response.ok:
