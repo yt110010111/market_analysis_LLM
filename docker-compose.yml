@@ -8,7 +8,20 @@ services:
       - ollama_data:/root/.ollama
     restart: unless-stopped
 
-
+  neo4j:
+    image: neo4j:5.14-community
+    container_name: neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/password123
+      - NEO4J_dbms_memory_pagecache_size=512M
+      - NEO4J_dbms_memory_heap_max__size=1G
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    restart: unless-stopped
 
   web_search_agent:
     build:
@@ -17,7 +30,7 @@ services:
     container_name: web_search_agent
     environment:
       - OLLAMA_ENDPOINT=http://ollama:11434
-      - MODEL_NAME=llama3.2:3b            # 建議加上
+      - MODEL_NAME=llama3.2:3b
       - TAVILY_API_KEY=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
       - USE_MOCK=true
     ports:
@@ -26,16 +39,43 @@ services:
       - ollama
     restart: unless-stopped
 
+  analysis_agent:
+    build:
+      context: ./agents/analysis_agent
+      dockerfile: Dockerfile
+    container_name: analysis_agent
+    environment:
+      - OLLAMA_ENDPOINT=http://ollama:11434
+      - MODEL_NAME=llama3.2:3b
+      - NEO4J_URL=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password123
+      - WEB_SCRAPING_AGENT_URL=http://web_scraping_agent:8003
+      - DATA_EXTRACTION_AGENT_URL=http://data_extraction_agent:8004
+    ports:
+      - "8002:8002"
+    depends_on:
+      - ollama
+      - neo4j
+      - web_search_agent
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: frontend
+    environment:
+      - VITE_WEB_SEARCH_AGENT_URL=http://localhost:8001
+      - VITE_ANALYSIS_AGENT_URL=http://localhost:8002
     ports:
       - "3000:3000"
     depends_on:
       - web_search_agent
+      - analysis_agent
     restart: unless-stopped
 
 volumes:
   ollama_data:
+  neo4j_data:
+  neo4j_logs:

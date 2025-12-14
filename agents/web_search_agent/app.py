@@ -38,6 +38,7 @@ app.add_middleware(
 # Constants / singletons
 # ----------------------
 OLLAMA_HOST = "http://ollama:11434"
+ANALYSIS_AGENT_URL = "http://analysis_agent:8002"  # 新增
 SEARCH_MAX_RESULTS = 10
 
 search_engine = DuckDuckGoSearchEngine(max_results=SEARCH_MAX_RESULTS)
@@ -85,18 +86,18 @@ async def health():
     return results
 
 # ----------------------
-# POST endpoint for frontend
+# POST endpoint for frontend (主要入口)
 # ----------------------
 @app.post("/search")
 async def search_post(request: SearchRequest):
     """
-    POST endpoint for frontend to send search queries
+    前端的主要入口：執行搜尋後自動呼叫 analysis_agent
     """
-    logger.info(f"Received POST /search request: query='{request.query}'")
+    logger.info(f"📥 收到前端搜尋請求: query='{request.query}'")
     try:
         start_time = asyncio.get_event_loop().time()
 
-        # 查詢擴展（已重新啟用）
+        # ========== 步驟 1: 查詢擴展 ==========
         logger.info(f"📝 開始查詢擴展...")
         expanded_queries = await query_expander.expand(request.query)
         logger.info(f"✅ 查詢擴展完成: {expanded_queries}")
@@ -104,11 +105,10 @@ async def search_post(request: SearchRequest):
         all_queries = [request.query] + expanded_queries
         logger.info(f"🔍 將執行 {len(all_queries)} 個查詢: {all_queries}")
 
-        # Search with all queries
+        # ========== 步驟 2: 執行搜尋 ==========
         all_results = []
         seen_urls = set()
         for idx, query in enumerate(all_queries):
-            # 在每個查詢之間添加延遲，避免 rate limit
             if idx > 0:
                 await asyncio.sleep(1.5)
             
@@ -122,26 +122,89 @@ async def search_post(request: SearchRequest):
             if len(all_results) >= search_engine.max_results:
                 break
 
-        final = all_results[:search_engine.max_results]
-        execution_time = asyncio.get_event_loop().time() - start_time
-        logger.info(f"Search completed: total_results={len(final)}, execution_time={execution_time:.3f}s")
+        final_results = all_results[:search_engine.max_results]
+        search_execution_time = asyncio.get_event_loop().time() - start_time
+        logger.info(f"✅ 搜尋完成: total_results={len(final_results)}, time={search_execution_time:.3f}s")
 
-        return {
+        # 準備搜尋結果
+        search_data = {
             "status": "success",
             "original_query": request.query,
             "expanded_queries": expanded_queries,
             "total_queries": len(all_queries),
-            "results": final,
-            "total_results": len(final),
-            "execution_time": execution_time,
+            "results": final_results,
+            "total_results": len(final_results),
+            "execution_time": search_execution_time,
             "timestamp": __import__("datetime").datetime.utcnow().isoformat() + "Z",
         }
+
+        # ========== 步驟 3: 呼叫 Analysis Agent ==========
+        logger.info(f"🧠 呼叫 Analysis Agent 進行分析...")
+        try:
+            analysis_response = requests.post(
+                f"{ANALYSIS_AGENT_URL}/analyze",
+                json={
+                    "query": request.query,
+                    "results": final_results
+                },
+                timeout=30
+            )
+            
+            if analysis_response.ok:
+                analysis_data = analysis_response.json()
+                logger.info(f"✅ Analysis 完成: action={analysis_data.get('action')}")
+                
+                # ========== 步驟 4: 根據分析結果執行工作流 ==========
+                orchestrate_response = requests.post(
+                    f"{ANALYSIS_AGENT_URL}/orchestrate",
+                    json=analysis_data.get("details"),
+                    timeout=60
+                )
+                
+                if orchestrate_response.ok:
+                    orchestrate_data = orchestrate_response.json()
+                    logger.info(f"✅ Orchestration 完成: {orchestrate_data.get('action')}")
+                    
+                    # 返回完整結果
+                    return {
+                        "status": "success",
+                        "search_results": search_data,
+                        "analysis": analysis_data,
+                        "final_result": orchestrate_data
+                    }
+                else:
+                    logger.error(f"❌ Orchestration 失敗: {orchestrate_response.text}")
+                    # 即使編排失敗，也返回搜尋和分析結果
+                    return {
+                        "status": "partial_success",
+                        "search_results": search_data,
+                        "analysis": analysis_data,
+                        "error": "Orchestration failed"
+                    }
+            else:
+                logger.error(f"❌ Analysis 失敗: {analysis_response.text}")
+                # 如果分析失敗，至少返回搜尋結果
+                return {
+                    "status": "partial_success",
+                    "search_results": search_data,
+                    "error": "Analysis failed"
+                }
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ 呼叫 Analysis Agent 錯誤: {e}")
+            # 如果 analysis_agent 不可用，返回搜尋結果
+            return {
+                "status": "partial_success",
+                "search_results": search_data,
+                "error": f"Analysis agent unavailable: {str(e)}"
+            }
+
     except Exception as e:
         logger.exception("POST /search endpoint error")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ----------------------
-# Web search endpoint (GET - 保留原有功能)
+# Web search endpoint (GET - 保留原有功能，用於獨立測試)
 # ----------------------
 @app.get("/search", response_model=SearchResponse)
 async def search(
@@ -149,6 +212,9 @@ async def search(
     expand: bool = Query(True, description="Whether to expand query using Ollama"),
     max_results: Optional[int] = Query(None, description="Limit results (overrides default)")
 ):
+    """
+    GET endpoint - 只執行搜尋，不呼叫其他 agent（用於測試）
+    """
     logger.info(f"Received GET /search request: q='{q}', expand={expand}, max_results={max_results}")
     try:
         if max_results:
@@ -165,7 +231,6 @@ async def search(
         all_results = []
         seen_urls = set()
         for idx, query in enumerate(all_queries):
-            # 在每個查詢之間添加延遲，避免 rate limit
             if idx > 0:
                 await asyncio.sleep(1.5)
                 
