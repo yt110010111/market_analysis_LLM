@@ -31,12 +31,14 @@ services:
     environment:
       - OLLAMA_ENDPOINT=http://ollama:11434
       - MODEL_NAME=llama3.2:3b
-      - TAVILY_API_KEY=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
-      - USE_MOCK=true
+      - TAVILY_API_KEY=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
+      - USE_MOCK=false
+      - ANALYSIS_AGENT_URL=http://analysis_agent:8002
     ports:
       - "8001:8001"
     depends_on:
       - ollama
+      - analysis_agent
     restart: unless-stopped
 
   analysis_agent:
@@ -57,7 +59,34 @@ services:
     depends_on:
       - ollama
       - neo4j
-      - web_search_agent
+      - web_scraping_agent
+      - data_extraction_agent
+    restart: unless-stopped
+
+  web_scraping_agent:
+    build:
+      context: ./agents/web_scraping_agent
+      dockerfile: Dockerfile
+    container_name: web_scraping_agent
+    environment:
+      - SCRAPING_TIMEOUT=30
+      - SCRAPING_MAX_RETRIES=3
+    ports:
+      - "8003:8003"
+    restart: unless-stopped
+
+  data_extraction_agent:
+    build:
+      context: ./agents/data_extraction_agent
+      dockerfile: Dockerfile
+    container_name: data_extraction_agent
+    environment:
+      - OLLAMA_ENDPOINT=http://ollama:11434
+      - MODEL_NAME=llama3.2:3b
+    ports:
+      - "8004:8004"
+    depends_on:
+      - ollama
     restart: unless-stopped
 
   frontend:
@@ -67,12 +96,10 @@ services:
     container_name: frontend
     environment:
       - VITE_WEB_SEARCH_AGENT_URL=http://localhost:8001
-      - VITE_ANALYSIS_AGENT_URL=http://localhost:8002
     ports:
       - "3000:3000"
     depends_on:
       - web_search_agent
-      - analysis_agent
     restart: unless-stopped
 
 volumes:

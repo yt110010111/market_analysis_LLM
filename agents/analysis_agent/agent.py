@@ -203,30 +203,150 @@ class AnalysisAgent:
             )
             scraping_response.raise_for_status()
             scraped_data = scraping_response.json()
+            logger.info(f"✅ Scraping completed: {scraped_data.get('successful', 0)} successful")
         except Exception as e:
             logger.error(f"Error calling web_scraping_agent: {e}")
-            scraped_data = {"error": str(e)}
+            scraped_data = {"error": str(e), "results": []}
         
         # 步驟 2: 呼叫 data_extraction_agent 分析關聯
         try:
             extraction_response = requests.post(
                 f"{self.data_extraction_agent_url}/extract",
                 json={"data": scraped_data, "query": query},
-                timeout=60
+                timeout=90
             )
             extraction_response.raise_for_status()
             extracted_data = extraction_response.json()
+            logger.info(f"✅ Extraction completed: {len(extracted_data.get('entities', []))} entities")
         except Exception as e:
             logger.error(f"Error calling data_extraction_agent: {e}")
-            extracted_data = {"error": str(e)}
+            extracted_data = {"error": str(e), "entities": [], "relationships": []}
         
         # 步驟 3: 儲存到 Neo4j
-        # TODO: 實作 Neo4j 儲存邏輯
+        neo4j_result = self._store_to_neo4j(extracted_data, query)
+        
+        # 步驟 4: 生成最終報告
+        report = self._generate_final_report(query, scraped_data, extracted_data)
         
         return {
             "status": "completed",
             "action": "data_collected_and_stored",
             "query": query,
             "scraped_urls": urls,
-            "extracted_data": extracted_data
+            "scraping_stats": {
+                "successful": scraped_data.get("successful", 0),
+                "failed": scraped_data.get("failed", 0)
+            },
+            "extraction_stats": {
+                "entities": len(extracted_data.get("entities", [])),
+                "relationships": len(extracted_data.get("relationships", []))
+            },
+            "neo4j_stored": neo4j_result.get("success", False),
+            "report": report
         }
+    
+    def _store_to_neo4j(self, extracted_data: Dict[str, Any], query: str) -> Dict[str, Any]:
+        """
+        將提取的實體和關係儲存到 Neo4j
+        """
+        try:
+            from neo4j import GraphDatabase
+            
+            neo4j_uri = os.getenv("NEO4J_URL", "bolt://neo4j:7687")
+            neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+            neo4j_password = os.getenv("NEO4J_PASSWORD", "password123")
+            
+            driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+            
+            with driver.session() as session:
+                # 創建查詢節點
+                session.run(
+                    "MERGE (q:Query {text: $query_text, timestamp: datetime()}) RETURN q",
+                    query_text=query
+                )
+                
+                # 創建實體節點
+                entities = extracted_data.get("entities", [])
+                for entity in entities:
+                    session.run(
+                        """
+                        MERGE (e:Entity {name: $name})
+                        SET e.type = $type, 
+                            e.description = $description,
+                            e.source_url = $source_url,
+                            e.updated_at = datetime()
+                        WITH e
+                        MATCH (q:Query {text: $query_text})
+                        MERGE (q)-[:FOUND]->(e)
+                        """,
+                        name=entity.get("name"),
+                        type=entity.get("type"),
+                        description=entity.get("description"),
+                        source_url=entity.get("source_url"),
+                        query_text=query
+                    )
+                
+                # 創建關係
+                relationships = extracted_data.get("relationships", [])
+                for rel in relationships:
+                    session.run(
+                        """
+                        MATCH (source:Entity {name: $source})
+                        MATCH (target:Entity {name: $target})
+                        MERGE (source)-[r:RELATES_TO {type: $relation}]->(target)
+                        SET r.description = $description,
+                            r.updated_at = datetime()
+                        """,
+                        source=rel.get("source"),
+                        target=rel.get("target"),
+                        relation=rel.get("relation"),
+                        description=rel.get("description")
+                    )
+            
+            driver.close()
+            
+            logger.info(f"✅ 儲存到 Neo4j: {len(entities)} 實體, {len(relationships)} 關係")
+            
+            return {
+                "success": True,
+                "entities_stored": len(entities),
+                "relationships_stored": len(relationships)
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Neo4j 儲存失敗: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def _generate_final_report(self, query: str, scraped_data: Dict, extracted_data: Dict) -> str:
+        """
+        基於爬取和萃取的資料生成最終報告
+        """
+        summary = extracted_data.get("overall_summary", "")
+        entities = extracted_data.get("entities", [])
+        
+        prompt = f"""基於以下資訊，生成一份關於「{query}」的詳細研究報告。
+
+整體摘要:
+{summary}
+
+發現的關鍵實體:
+{', '.join([e.get('name', '') for e in entities[:10]])}
+
+請生成一份結構化報告，包含：
+1. 執行摘要（2-3 段）
+2. 主要發現
+3. 詳細分析
+4. 結論和建議
+
+報告：
+"""
+        
+        try:
+            report = self._call_ollama(prompt)
+            return report
+        except Exception as e:
+            logger.error(f"Error generating report: {e}")
+            return f"基於收集的資料，關於{query}的主要發現如下：\n\n{summary}"
