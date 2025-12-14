@@ -7,6 +7,18 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
+    # ============ GPU 加速配置 ============
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all  # 使用所有可用的 GPU
+              capabilities: [gpu]
+    # 如果上面的配置不工作，嘗試下面這個（舊版 Docker Compose）
+    # runtime: nvidia
+    # environment:
+    #   - NVIDIA_VISIBLE_DEVICES=all
 
   neo4j:
     image: neo4j:5.14-community
@@ -30,7 +42,7 @@ services:
     container_name: web_search_agent
     environment:
       - OLLAMA_ENDPOINT=http://ollama:11434
-      - MODEL_NAME=llama3.2:3b
+      - MODEL_NAME=llama3.2:3b  # 改為 1b 模型（速度快 3-5 倍）
       - TAVILY_API_KEY=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
       - USE_MOCK=true
       - ANALYSIS_AGENT_URL=http://analysis_agent:8002
@@ -48,7 +60,7 @@ services:
     container_name: analysis_agent
     environment:
       - OLLAMA_ENDPOINT=http://ollama:11434
-      - MODEL_NAME=llama3.2:3b
+      - MODEL_NAME=llama3.2:3b  # 改為 1b 模型
       - NEO4J_URL=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=password123
@@ -83,7 +95,11 @@ services:
     container_name: data_extraction_agent
     environment:
       - OLLAMA_ENDPOINT=http://ollama:11434
-      - MODEL_NAME=llama3.2:3b
+      - MODEL_NAME=llama3.2:3b  # 改為 1b 模型
+      - MAX_DOCS=3  # 減少處理文檔數量
+      - MAX_CHARS_PER_DOC=3000  # 減少每個文檔字符數
+      - OLLAMA_TIMEOUT=30  # 降低超時時間
+      - MAX_WORKERS=2  # 並行處理數量
     ports:
       - "8004:8004"
     depends_on:
