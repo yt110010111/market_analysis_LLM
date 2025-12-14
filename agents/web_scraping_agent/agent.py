@@ -1,190 +1,230 @@
 import os
-import logging
-import asyncio
-from typing import List, Dict, Any
-from datetime import datetime
-import httpx
-from bs4 import BeautifulSoup
 import json
+import logging
+from typing import Dict, List, Any
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class WebScrapingAgent:
+class DataExtractionAgent:
     """
-    網頁爬蟲代理：爬取指定 URL 的內容
+    資料萃取代理：使用 Ollama 分析爬取的內容，提取關鍵資訊和關聯
     """
     
     def __init__(self):
-        self.timeout = int(os.getenv("SCRAPING_TIMEOUT", "30"))
-        self.max_retries = int(os.getenv("SCRAPING_MAX_RETRIES", "3"))
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        self.ollama_endpoint = os.getenv("OLLAMA_ENDPOINT", "http://ollama:11434")
+        self.model_name = os.getenv("MODEL_NAME", "llama3.2:3b")
         
-    async def scrape_urls(self, urls: List[str], query: str = "") -> Dict[str, Any]:
+    def extract_and_analyze(self, scraped_data: Dict[str, Any], query: str = "") -> Dict[str, Any]:
         """
-        爬取多個 URL 的內容
+        分析爬取的資料，提取關鍵資訊和實體關聯
         
         Args:
-            urls: 要爬取的 URL 列表
-            query: 相關的查詢（用於上下文）
+            scraped_data: web_scraping_agent 的輸出
+            query: 原始查詢
             
         Returns:
-            爬取結果的字典
+            提取的實體、關係和摘要
         """
-        logger.info(f"🕷️ 開始爬取 {len(urls)} 個 URL")
+        logger.info(f"🔬 開始分析 {len(scraped_data.get('results', []))} 個文檔")
         
-        results = []
-        successful = 0
-        failed = 0
+        results = scraped_data.get('results', [])
+        if not results:
+            logger.warning("⚠️ 沒有可分析的資料")
+            return {
+                "query": query,
+                "entities": [],
+                "relationships": [],
+                "summary": "無資料可分析",
+                "status": "no_data"
+            }
         
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
-            tasks = [self._scrape_single_url(client, url, idx) for idx, url in enumerate(urls)]
-            scrape_results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 分析每個文檔
+        all_entities = []
+        all_relationships = []
+        document_summaries = []
         
-        for result in scrape_results:
-            if isinstance(result, Exception):
-                logger.error(f"❌ 爬取失敗: {result}")
-                failed += 1
-            elif result and result.get("success"):
-                results.append(result)
-                successful += 1
-            else:
-                failed += 1
+        for idx, doc in enumerate(results):
+            if not doc.get("success"):
+                continue
+                
+            logger.info(f"📄 分析文檔 {idx+1}/{len(results)}: {doc.get('title', 'Untitled')}")
+            
+            # 提取實體和關係
+            extraction = self._extract_entities_and_relationships(doc, query)
+            
+            all_entities.extend(extraction.get("entities", []))
+            all_relationships.extend(extraction.get("relationships", []))
+            document_summaries.append({
+                "url": doc.get("url"),
+                "title": doc.get("title"),
+                "summary": extraction.get("summary", "")
+            })
         
-        logger.info(f"✅ 爬取完成: 成功 {successful}, 失敗 {failed}")
+        # 去重實體（基於名稱）
+        unique_entities = self._deduplicate_entities(all_entities)
+        
+        # 生成整體摘要
+        overall_summary = self._generate_overall_summary(document_summaries, query)
+        
+        logger.info(f"✅ 分析完成: 實體 {len(unique_entities)} 個, 關係 {len(all_relationships)} 個")
         
         return {
             "query": query,
-            "total_urls": len(urls),
-            "successful": successful,
-            "failed": failed,
-            "results": results,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            "total_documents": len(results),
+            "entities": unique_entities,
+            "relationships": all_relationships,
+            "document_summaries": document_summaries,
+            "overall_summary": overall_summary,
+            "status": "success"
         }
     
-    async def _scrape_single_url(self, client: httpx.AsyncClient, url: str, idx: int) -> Dict[str, Any]:
+    def _extract_entities_and_relationships(self, doc: Dict[str, Any], query: str) -> Dict[str, Any]:
         """
-        爬取單個 URL
+        從單個文檔中提取實體和關係
         """
-        logger.info(f"📄 [{idx+1}] 爬取: {url}")
+        content = doc.get("full_text", "") or doc.get("content", "")
+        title = doc.get("title", "")
         
-        headers = {
-            "User-Agent": self.user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-        }
+        # 截斷過長的內容
+        if len(content) > 3000:
+            content = content[:3000]
         
-        for attempt in range(self.max_retries):
-            try:
-                response = await client.get(url, headers=headers)
-                response.raise_for_status()
-                
-                # 解析 HTML
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # 提取標題
-                title = soup.find('title')
-                title_text = title.get_text().strip() if title else ""
-                
-                # 提取主要內容
-                content = self._extract_main_content(soup)
-                
-                # 提取 meta 描述
-                meta_desc = soup.find('meta', attrs={'name': 'description'})
-                description = meta_desc.get('content', '') if meta_desc else ""
-                
-                # 提取所有段落文字
-                paragraphs = soup.find_all(['p', 'article', 'section'])
-                text_content = '\n\n'.join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
-                
-                # 截斷過長的內容（保留前 5000 字元）
-                if len(text_content) > 5000:
-                    text_content = text_content[:5000] + "..."
-                
-                logger.info(f"✅ [{idx+1}] 成功: {url} (長度: {len(text_content)} 字元)")
-                
-                return {
-                    "success": True,
-                    "url": url,
-                    "title": title_text,
-                    "description": description,
-                    "content": content,
-                    "full_text": text_content,
-                    "content_length": len(text_content),
-                    "scraped_at": datetime.utcnow().isoformat() + "Z"
-                }
-                
-            except httpx.HTTPStatusError as e:
-                logger.warning(f"⚠️ [{idx+1}] HTTP 錯誤 (嘗試 {attempt+1}/{self.max_retries}): {e.response.status_code}")
-                if attempt == self.max_retries - 1:
-                    return {
-                        "success": False,
-                        "url": url,
-                        "error": f"HTTP {e.response.status_code}",
-                        "error_type": "http_error"
-                    }
-                await asyncio.sleep(1)
-                
-            except httpx.TimeoutException:
-                logger.warning(f"⏱️ [{idx+1}] 超時 (嘗試 {attempt+1}/{self.max_retries})")
-                if attempt == self.max_retries - 1:
-                    return {
-                        "success": False,
-                        "url": url,
-                        "error": "Request timeout",
-                        "error_type": "timeout"
-                    }
-                await asyncio.sleep(1)
-                
-            except Exception as e:
-                logger.error(f"❌ [{idx+1}] 錯誤: {str(e)}")
-                return {
-                    "success": False,
-                    "url": url,
-                    "error": str(e),
-                    "error_type": "unknown"
-                }
-    
-    def _extract_main_content(self, soup: BeautifulSoup) -> str:
-        """
-        提取網頁的主要內容
-        嘗試找到 main, article 或其他主要內容標籤
-        """
-        # 優先尋找這些標籤
-        main_tags = ['main', 'article', '[role="main"]', '.content', '#content']
+        prompt = f"""分析以下文本，提取關鍵實體和它們之間的關係。
+
+查詢主題: {query}
+文檔標題: {title}
+
+文檔內容:
+{content}
+
+請以 JSON 格式輸出，包含：
+1. entities: 實體列表，每個實體包含 name (名稱), type (類型: 人物/組織/產品/概念/地點), description (簡短描述)
+2. relationships: 關係列表，每個關係包含 source (來源實體), target (目標實體), relation (關係類型), description (描述)
+3. summary: 這篇文檔的簡短摘要（2-3句話）
+
+只返回 JSON，不要其他文字：
+{{
+  "entities": [
+    {{"name": "實體名稱", "type": "類型", "description": "描述"}}
+  ],
+  "relationships": [
+    {{"source": "來源", "target": "目標", "relation": "關係", "description": "描述"}}
+  ],
+  "summary": "摘要文字"
+}}
+"""
         
-        for tag in main_tags:
-            if tag.startswith('.') or tag.startswith('#') or tag.startswith('['):
-                # CSS 選擇器
-                element = soup.select_one(tag)
-            else:
-                element = soup.find(tag)
+        try:
+            response = self._call_ollama(prompt)
             
-            if element:
-                text = element.get_text(separator='\n', strip=True)
-                if len(text) > 100:  # 確保有足夠的內容
-                    return text[:3000]  # 限制長度
-        
-        # 如果找不到主要內容，返回 body 的文字
-        body = soup.find('body')
-        if body:
-            # 移除 script 和 style 標籤
-            for script in body(["script", "style", "nav", "footer", "header"]):
-                script.decompose()
-            return body.get_text(separator='\n', strip=True)[:3000]
-        
-        return ""
+            # 解析 JSON
+            # 清理可能的 markdown 代碼塊
+            response = response.strip()
+            if response.startswith("```json"):
+                response = response[7:]
+            if response.startswith("```"):
+                response = response[3:]
+            if response.endswith("```"):
+                response = response[:-3]
+            response = response.strip()
+            
+            extracted = json.loads(response)
+            
+            # 為實體添加來源
+            for entity in extracted.get("entities", []):
+                entity["source_url"] = doc.get("url")
+                entity["source_title"] = title
+            
+            return extracted
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON 解析失敗: {e}")
+            logger.debug(f"原始回應: {response[:500]}")
+            
+            # 返回空結果
+            return {
+                "entities": [],
+                "relationships": [],
+                "summary": "無法解析文檔內容"
+            }
+        except Exception as e:
+            logger.error(f"❌ 提取失敗: {e}")
+            return {
+                "entities": [],
+                "relationships": [],
+                "summary": "提取過程發生錯誤"
+            }
     
-    def save_results_to_json(self, results: Dict[str, Any], output_path: str = "scraping_results.json"):
+    def _deduplicate_entities(self, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        將爬取結果儲存為 JSON 檔案
+        去除重複的實體（基於名稱）
+        """
+        seen = {}
+        for entity in entities:
+            name = entity.get("name", "").lower()
+            if name and name not in seen:
+                seen[name] = entity
+            elif name:
+                # 合併來源資訊
+                if "sources" not in seen[name]:
+                    seen[name]["sources"] = [seen[name].get("source_url")]
+                if entity.get("source_url") not in seen[name]["sources"]:
+                    seen[name]["sources"].append(entity.get("source_url"))
+        
+        return list(seen.values())
+    
+    def _generate_overall_summary(self, document_summaries: List[Dict[str, Any]], query: str) -> str:
+        """
+        生成所有文檔的整體摘要
+        """
+        if not document_summaries:
+            return "無可用資料"
+        
+        summaries_text = "\n\n".join([
+            f"來源 {idx+1} ({doc['title']}): {doc['summary']}"
+            for idx, doc in enumerate(document_summaries)
+        ])
+        
+        prompt = f"""基於以下多個來源的摘要，生成一個整合性的總結，回答查詢主題。
+
+查詢主題: {query}
+
+各來源摘要:
+{summaries_text}
+
+請提供一個清晰、連貫的總結（3-5 句話），整合所有來源的關鍵資訊：
+"""
+        
+        try:
+            overall_summary = self._call_ollama(prompt)
+            return overall_summary.strip()
+        except Exception as e:
+            logger.error(f"❌ 生成總結失敗: {e}")
+            return "無法生成整體摘要"
+    
+    def _call_ollama(self, prompt: str, max_tokens: int = 2000) -> str:
+        """
+        呼叫 Ollama API
         """
         try:
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-            logger.info(f"💾 結果已儲存至: {output_path}")
-            return True
+            response = requests.post(
+                f"{self.ollama_endpoint}/api/generate",
+                json={
+                    "model": self.model_name,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,  # 較低的溫度以獲得更一致的輸出
+                        "num_predict": max_tokens
+                    }
+                },
+                timeout=60
+            )
+            response.raise_for_status()
+            return response.json().get("response", "")
         except Exception as e:
-            logger.error(f"❌ 儲存失敗: {e}")
-            return False
+            logger.error(f"❌ Ollama 呼叫失敗: {e}")
+            raise

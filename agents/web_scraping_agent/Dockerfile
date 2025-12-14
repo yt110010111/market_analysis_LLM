@@ -17,11 +17,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 暴露端口
-EXPOSE 8003
+EXPOSE 8004
 
 # 健康檢查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8003/health || exit 1
+    CMD curl -f http://localhost:8004/health || exit 1
 
-# 啟動應用
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8003"]
+# 啟動應用（使用 uvicorn 直接啟動）
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8004"]

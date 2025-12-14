@@ -98,6 +98,22 @@ async def check_database_coverage(request: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/")
+async def root():
+    """根端點"""
+    return {
+        "service": "analysis_agent",
+        "version": "0.1.0",
+        "status": "running",
+        "endpoints": {
+            "health": "/health",
+            "analyze": "/analyze (POST)",
+            "orchestrate": "/orchestrate (POST)",
+            "check_coverage": "/check-coverage (POST)"
+        }
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8002)
