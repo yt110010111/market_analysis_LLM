@@ -32,7 +32,7 @@ services:
       - OLLAMA_ENDPOINT=http://ollama:11434
       - MODEL_NAME=llama3.2:3b
       - TAVILY_API_KEY=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
-      - USE_MOCK=false
+      - USE_MOCK=true
       - ANALYSIS_AGENT_URL=http://analysis_agent:8002
     ports:
       - "8001:8001"
@@ -71,6 +71,7 @@ services:
     environment:
       - SCRAPING_TIMEOUT=30
       - SCRAPING_MAX_RETRIES=3
+      - TAVILY_API_KEY=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
     ports:
       - "8003:8003"
     restart: unless-stopped
