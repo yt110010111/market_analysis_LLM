@@ -48,14 +48,17 @@ docker compose up agent_name
 
 
 ### agent logs
+```
 docker compose up agent_name
 docker compose exec agent_name bash
 docker-compose logs -f container
-
+```
 
 
 ### 申請tavily API key
+```
 https://app.tavily.com/home
+```
 docker-compose.yml:
 environment替換:
 ```
