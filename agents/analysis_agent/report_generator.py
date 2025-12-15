@@ -263,7 +263,7 @@ class ReportGenerator:
                 search_info += f"   摘要: {result.get('snippet', 'N/A')[:150]}\n"
         
         # 構建完整 prompt
-        prompt = f"""你是一位專業的金融分析師和研究員。請基於以下資訊，撰寫一份關於「{query}」的詳細研究報告。
+        prompt = f"""你是一位專業的研究員。請基於以下資訊，用繁體中文(zh-tw)撰寫一份關於「{query}」的詳細研究報告。
 
 {entities_info}
 {relationships_info}
@@ -287,9 +287,9 @@ class ReportGenerator:
    - 深入分析實體之間的關係
    - 解釋重要性和影響
 
-5. **結論與建議**
+5. **結論與總結**
    - 總結關鍵要點
-   - 提供可行的建議（如適用）
+   - 明確的回覆使用者所的問題
 
 請確保報告：
 - 基於提供的資料
