@@ -1,16 +1,26 @@
-#agents/analysis_agent/app.py 
+# agents/analysis_agent/app.py
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, List
 import logging
-from agent import AnalysisAgent
+from agent import AnalysisAgent  # ✅ 正確：導入 AnalysisAgent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Analysis Agent API")
 
-agent = AnalysisAgent()
+# ⭐ 添加 CORS 中間件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允許所有來源（生產環境應限制）
+    allow_credentials=True,
+    allow_methods=["*"],  # 允許所有 HTTP 方法
+    allow_headers=["*"],  # 允許所有 headers
+)
+
+agent = AnalysisAgent()  # ✅ 正確：實例化 AnalysisAgent
 
 
 class SearchResultsRequest(BaseModel):
@@ -35,8 +45,8 @@ async def analyze_search_results(request: SearchResultsRequest):
     """
     分析搜尋結果並決定下一步行動
     
-    - 如果資料充足：返回 action="generate_report"
-    - 如果資料不足：返回 action="scrape_and_extract"
+    - 如果資料充足:返回 action="generate_report"
+    - 如果資料不足:返回 action="scrape_and_extract"
     """
     try:
         logger.info(f"Received analysis request for query: {request.query}")
@@ -65,7 +75,7 @@ async def orchestrate_workflow(request: Dict[str, Any]):
     """
     執行完整的工作流編排
     
-    根據分析結果，執行相應的工作流：
+    根據分析結果,執行相應的工作流:
     - generate_report: 直接生成報告
     - scrape_and_extract: 執行爬蟲 -> 萃取 -> 儲存 -> 生成報告
     """
@@ -84,7 +94,7 @@ async def orchestrate_workflow(request: Dict[str, Any]):
 @app.post("/check-coverage")
 async def check_database_coverage(request: Dict[str, Any]):
     """
-    單獨檢查資料庫覆蓋度（用於測試）
+    單獨檢查資料庫覆蓋度(用於測試)
     """
     try:
         query = request.get("query", "")

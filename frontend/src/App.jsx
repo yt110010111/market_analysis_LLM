@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import axios from 'axios';
+import ReactMarkdown from 'react-markdown';
 import './App.css';
 
 function App() {
@@ -7,6 +8,9 @@ function App() {
   const [showReport, setShowReport] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [reportTitle, setReportTitle] = useState('');
+  const [reportContent, setReportContent] = useState('');
+  const [reportSources, setReportSources] = useState(null);
+  const [error, setError] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -18,29 +22,64 @@ function App() {
 
     setIsLoading(true);
     setReportTitle(userInput);
+    setError('');
+    setReportContent('');
 
     try {
-      // 發送請求到 web_search_agent
-      await axios.post('/api/search', {
+      // 步驟 1: 發送搜尋請求
+      console.log('步驟 1: 發送搜尋請求...');
+      const searchResponse = await axios.post('/api/search', {
         query: userInput
       });
 
-      // 顯示報告頁面（即使沒有回傳資料）
-      setTimeout(() => {
+      console.log('搜尋結果:', searchResponse.data);
+
+      // 步驟 2: 分析搜尋結果
+      console.log('步驟 2: 分析搜尋結果...');
+      const analysisResponse = await axios.post('/api/analyze', {
+        query: userInput,
+        results: searchResponse.data.results || []
+      });
+
+      console.log('分析結果:', analysisResponse.data);
+
+      // 步驟 3: 執行工作流並生成報告
+      console.log('步驟 3: 生成報告...');
+      const orchestrateResponse = await axios.post('/api/orchestrate', {
+        action: analysisResponse.data.action,
+        query: userInput,
+        search_results: searchResponse.data.results || [],
+        urls_to_scrape: analysisResponse.data.details?.urls_to_scrape || []
+      });
+
+      console.log('報告結果:', orchestrateResponse.data);
+
+      // 檢查是否有報告內容
+      if (orchestrateResponse.data.report) {
+        setReportContent(orchestrateResponse.data.report);
+        setReportSources(orchestrateResponse.data.sources);
         setShowReport(true);
-        setIsLoading(false);
-      }, 1000);
+      } else {
+        throw new Error('服務器未返回報告內容');
+      }
 
     } catch (error) {
-      console.error('Error:', error);
+      console.error('錯誤:', error);
+      setError(error.response?.data?.detail || error.message || '發生未知錯誤');
+      
+      // 顯示錯誤報告
+      setReportContent(`# 生成報告時發生錯誤\n\n${error.message}\n\n請稍後再試或聯繫管理員。`);
+      setShowReport(true);
+    } finally {
       setIsLoading(false);
-      alert('發送請求時發生錯誤，請稍後再試');
     }
   };
 
   const handleClose = () => {
     setShowReport(false);
     setUserInput('');
+    setReportContent('');
+    setError('');
   };
 
   return (
@@ -56,7 +95,7 @@ function App() {
               type="text"
               value={userInput}
               onChange={(e) => setUserInput(e.target.value)}
-              placeholder="例如：人工智慧的最新發展趨勢"
+              placeholder="例如：SpaceX 的最新發展"
               className="search-input"
               disabled={isLoading}
             />
@@ -66,73 +105,59 @@ function App() {
               disabled={isLoading}
             >
               {isLoading ? (
-                <span className="loading-spinner"></span>
+                <>
+                  <span className="loading-spinner"></span>
+                  <span style={{ marginLeft: '8px' }}>生成中...</span>
+                </>
               ) : (
                 '生成報告'
               )}
             </button>
           </form>
+
+          {error && (
+            <div className="error-message">
+              ⚠️ {error}
+            </div>
+          )}
         </div>
       </div>
 
       {/* 報告頁面 */}
       <div className={`report-panel ${showReport ? 'show' : ''}`}>
         <div className="report-header">
-          <h2>{reportTitle} 報告</h2>
+          <h2>{reportTitle}</h2>
           <button className="close-button" onClick={handleClose}>
             ✕
           </button>
         </div>
         
         <div className="report-content">
-          {/* 示意圖片 */}
-          <div className="report-image">
-            <img 
-              src="https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&h=400&fit=crop" 
-              alt="AI Generated" 
-            />
-          </div>
+          {reportContent ? (
+            <>
+              {/* Markdown 渲染 */}
+              <div className="markdown-content">
+                <ReactMarkdown>{reportContent}</ReactMarkdown>
+              </div>
 
-          {/* 文字內容 */}
-          <div className="report-section">
-            <h3>摘要</h3>
-            <p>
-              這是一個示範報告頁面。當您的 agent 完成後，這裡將顯示實際的分析結果。
-              目前您的查詢已經成功發送到 web_search_agent 進行處理。
-            </p>
-          </div>
-
-          <div className="report-section">
-            <h3>關鍵發現</h3>
-            <p>
-              • 您的查詢內容：{reportTitle}<br/>
-              • 系統已接收並處理您的請求<br/>
-              • 後續可以在這裡展示更詳細的分析結果
-            </p>
-          </div>
-
-          <div className="report-section">
-            <h3>詳細分析</h3>
-            <p>
-              當 analysis_agent 和 data_extraction_agent 完成後，
-              這裡可以顯示更深入的分析內容、圖表、統計數據等資訊。
-            </p>
-          </div>
-
-          <div className="report-image">
-            <img 
-              src="https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=800&h=400&fit=crop" 
-              alt="Data Analysis" 
-            />
-          </div>
-
-          <div className="report-section">
-            <h3>結論</h3>
-            <p>
-              報告的內容將根據您的查詢動態生成。目前這是一個示範頁面，
-              展示了報告的基本結構，包含標題、圖片和可滾動的文字段落。
-            </p>
-          </div>
+              {/* 來源資訊 */}
+              {reportSources && (
+                <div className="report-section sources-section">
+                  <h3>📊 資料來源統計</h3>
+                  <ul>
+                    <li>搜尋結果: {reportSources.search_results_count} 條</li>
+                    <li>知識庫實體: {reportSources.neo4j_entities} 個</li>
+                    <li>實體關係: {reportSources.neo4j_relationships} 個</li>
+                  </ul>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="loading-placeholder">
+              <div className="loading-spinner"></div>
+              <p>正在生成報告...</p>
+            </div>
+          )}
         </div>
       </div>
     </div>
