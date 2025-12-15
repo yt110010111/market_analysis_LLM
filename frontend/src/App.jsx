@@ -28,7 +28,7 @@ function App() {
     try {
       // 步驟 1: 發送搜尋請求
       console.log('步驟 1: 發送搜尋請求...');
-      const searchResponse = await axios.post('/api/search', {
+      const searchResponse = await axios.post('/api/analyze', {
         query: userInput
       });
 

@@ -10,12 +10,21 @@ export default function ChatBox() {
     setMessages([...messages, { sender: "user", text: input }]);
 
     try {
-      const res = await axios.post("http://web_search_agent:8001/ask", { prompt: input })
-      const reply = res.data.response || "No response";
+      // 使用 docker-compose service name 呼叫 analysis_agent
+      const res = await axios.post(`/api/analyze`,{ query: input });
+
+      // 取 report 與 workflow_steps 展示
+      const report = res.data.report || "No report";
+      const workflow = res.data.workflow_steps
+        ? JSON.stringify(res.data.workflow_steps, null, 2)
+        : "";
+
+      const reply = workflow ? `${report}\n\nWorkflow Steps:\n${workflow}` : report;
+
       setMessages((prev) => [...prev, { sender: "bot", text: reply }]);
     } catch (err) {
       console.error(err);
-      setMessages((prev) => [...prev, { sender: "bot", text: "Error" }]);
+      setMessages((prev) => [...prev, { sender: "bot", text: "Error generating report" }]);
     }
 
     setInput("");
