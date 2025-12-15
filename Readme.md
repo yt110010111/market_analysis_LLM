@@ -45,12 +45,7 @@ Start a specific agent:
 ```bash
 docker compose up agent_name
 ```
-
-
-### agent logs
 ```
-docker compose up agent_name
-docker compose exec agent_name bash
 docker-compose logs -f container
 ```
 
