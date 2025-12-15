@@ -8,39 +8,43 @@ By decomposing responsibilities across domain-specific agents, the system improv
 
 ## Services
 All services were composed in different container
+## Services Architecture
+
+All services are deployed as **independent Docker containers**, enabling modular development, isolation, and scalable orchestration.
 
 ### ollama
-LLM 推理服務，負責模型載入與文字生成。支援 NVIDIA GPU 加速。
+LLM inference service responsible for model loading and text generation. Supports NVIDIA GPU acceleration for improved performance.
 
-### backend
-neo4j
-graph database服務，用於儲存與查詢結構化知識（Graph / RAG）。提供連線介面。
-'''
-http://140.113.73.25:7474/browser/
-account:neo4j
-password:password123
-'''
+### backend (neo4j)
+Neo4j graph database service used to store and query structured knowledge for Graph-RAG workflows.  
+Access URL: http://140.113.73.25:7474/browser/  
+Account: `neo4j`  
+Password: `password123`
 
 ### web_search_agent
-對外查詢入口服務，負責搜尋請求、Query Expansion，並協調 Analysis Agent。
+External query entry service responsible for web search, query expansion, and coordination with the Analysis Agent.
 
 ### analysis_agent
-核心分析代理，負責推理流程控制，整合搜尋結果、Neo4j 圖資料查詢，並調用爬蟲與資料擷取等下游 agents。
+Core reasoning agent that orchestrates the inference workflow. It integrates search results, performs graph queries on Neo4j, and invokes downstream agents such as web scraping and data extraction.
 
 ### web_scraping_agent
-網頁爬取服務，負責抓取與清洗網頁內容，提供原始文本給分析與資料擷取流程。
+Web crawling service responsible for fetching and cleaning web content, providing raw text for analysis and data extraction.
 
 ### data_extraction_agent
-資料擷取服務，使用 LLM 從文件中萃取結構化資訊，並透過限制文件數量、長度與並行度以提升效能與穩定性。
+Information extraction service that uses LLMs to extract structured data from documents. Performance and stability are improved by limiting document count, content length, and concurrency.
 
-### frontend:
-'''
-http://localhost:3000/
-http://140.113.73.25:3000
-'''
-前端介面（Vite / React），提供使用者操作入口，透過 HTTP 呼叫 `web_search_agent` 與後端 agent 系統互動。
+### frontend
+Frontend interface built with Vite and React, serving as the user interaction entry point. It communicates with the `web_search_agent` and backend agent system via HTTP.  
+Access URLs:  
+- http://localhost:3000/  
+- http://140.113.73.25:3000/
 
+## Agent Logs
 
+Start a specific agent:
+```bash
+docker compose up agent_name
+```
 
 
 ### agent logs
@@ -54,6 +58,6 @@ docker-compose logs -f container
 https://app.tavily.com/home
 docker-compose.yml:
 environment替換:
-'''
+```
 -TAVILY_API_KEY
-'''
+```
