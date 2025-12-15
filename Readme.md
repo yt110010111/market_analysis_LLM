@@ -37,7 +37,7 @@ Information extraction service that uses LLMs to extract structured data from do
 Frontend interface built with Vite and React, serving as the user interaction entry point. It communicates with the `web_search_agent` and backend agent system via HTTP.  
 Access URLs:  
 - http://localhost:3000/  
-- http://140.113.73.25:3000/
+
 
 ## Agent Logs
 
