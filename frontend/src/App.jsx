@@ -88,14 +88,14 @@ function App() {
       <div className="main-container">
         <div className="content-wrapper">
           <h1 className="title">Research Assistant</h1>
-          <p className="subtitle">輸入您想要查詢的資訊，AI 將為您生成詳細報告</p>
+          <p className="subtitle">輸入您想要查詢的資訊，將為您生成詳細報告</p>
           
           <form onSubmit={handleSubmit} className="search-form">
             <input
               type="text"
               value={userInput}
               onChange={(e) => setUserInput(e.target.value)}
-              placeholder="例如：SpaceX 的最新發展"
+              placeholder="例如：SpaceX 的最新發展、人工智慧趨勢分析..."
               className="search-input"
               disabled={isLoading}
             />
@@ -107,17 +107,19 @@ function App() {
               {isLoading ? (
                 <>
                   <span className="loading-spinner"></span>
-                  <span style={{ marginLeft: '8px' }}>生成中...</span>
+                  <span>生成中...</span>
                 </>
               ) : (
-                '生成報告'
+                <>
+                  <span> 生成報告</span>
+                </>
               )}
             </button>
           </form>
 
           {error && (
             <div className="error-message">
-              ⚠️ {error}
+               錯誤：{error}
             </div>
           )}
         </div>
@@ -143,7 +145,7 @@ function App() {
               {/* 來源資訊 */}
               {reportSources && (
                 <div className="report-section sources-section">
-                  <h3>📊 資料來源統計</h3>
+                  <h3> 資料來源統計</h3>
                   <ul>
                     <li>搜尋結果: {reportSources.search_results_count} 條</li>
                     <li>知識庫實體: {reportSources.neo4j_entities} 個</li>
@@ -155,7 +157,7 @@ function App() {
           ) : (
             <div className="loading-placeholder">
               <div className="loading-spinner"></div>
-              <p>正在生成報告...</p>
+              <p> 正在生成精彩報告...</p>
             </div>
           )}
         </div>
