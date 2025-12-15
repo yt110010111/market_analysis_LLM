@@ -57,5 +57,5 @@ https://app.tavily.com/home
 docker-compose.yml:
 environment替換:
 ```
--TAVILY_API_KEY
+-TAVILY_API_KEY=your_api_key
 ```
