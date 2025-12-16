@@ -113,7 +113,7 @@ function App() {
                 </>
               ) : (
                 <>
-                  <span>🔍 生成報告</span>
+                  <span> 生成報告</span>
                 </>
               )}
             </button>

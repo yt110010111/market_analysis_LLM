@@ -1,4 +1,3 @@
-#agents/analysis_agent/report_generator.py
 import os
 import json
 import logging
@@ -21,6 +20,11 @@ class ReportGenerator:
         self.neo4j_url = os.getenv("NEO4J_URL", "bolt://neo4j:7687")
         self.neo4j_user = os.getenv("NEO4J_USER", "neo4j")
         self.neo4j_password = os.getenv("NEO4J_PASSWORD", "password123")
+        
+        # 🔧 可配置的查詢限制
+        self.max_entities_per_keyword = int(os.getenv("MAX_ENTITIES_PER_KEYWORD", "50"))  # 提高到 50
+        self.max_total_entities = int(os.getenv("MAX_TOTAL_ENTITIES", "100"))  # 提高到 100
+        self.max_relationships = int(os.getenv("MAX_RELATIONSHIPS", "100"))  # 提高到 100
     
     def generate_comprehensive_report(
         self, 
@@ -73,7 +77,7 @@ class ReportGenerator:
     
     def _query_neo4j_knowledge(self, query: str) -> Dict[str, Any]:
         """
-        從 Neo4j 查詢與 query 相關的知識圖譜
+        🔧 優化：從 Neo4j 查詢與 query 相關的知識圖譜，移除不必要的限制
         
         Returns:
             包含實體、關係和統計資訊的字典
@@ -91,10 +95,11 @@ class ReportGenerator:
             logger.info(f"      查詢關鍵詞: {keywords}")
             
             entities = []
+            entity_names_set = set()  # 用於去重
             relationships = []
             
             with driver.session() as session:
-                # 查詢 1: 直接匹配的實體
+                # 🔧 查詢 1: 直接匹配的實體（提高限制）
                 for keyword in keywords:
                     result = session.run("""
                         MATCH (e:Entity)
@@ -105,20 +110,21 @@ class ReportGenerator:
                                e.type as type,
                                e.description as description,
                                e.source_url as source_url
-                        LIMIT 10
-                    """, keyword=keyword)
+                        LIMIT $limit
+                    """, keyword=keyword, limit=self.max_entities_per_keyword)
                     
                     for record in result:
-                        entity = {
-                            "name": record["name"],
-                            "type": record["type"],
-                            "description": record["description"],
-                            "source_url": record["source_url"]
-                        }
-                        if entity not in entities:
-                            entities.append(entity)
+                        name = record["name"]
+                        if name not in entity_names_set:
+                            entity_names_set.add(name)
+                            entities.append({
+                                "name": name,
+                                "type": record["type"],
+                                "description": record["description"],
+                                "source_url": record["source_url"]
+                            })
                 
-                # 查詢 2: 通過 Query 節點找到的實體
+                # 🔧 查詢 2: 通過 Query 節點找到的實體（提高限制）
                 for keyword in keywords:
                     result = session.run("""
                         MATCH (q:Query)-[:FOUND]->(e:Entity)
@@ -127,44 +133,60 @@ class ReportGenerator:
                                e.type as type,
                                e.description as description,
                                e.source_url as source_url
-                        LIMIT 10
-                    """, keyword=keyword)
+                        LIMIT $limit
+                    """, keyword=keyword, limit=self.max_entities_per_keyword)
                     
                     for record in result:
-                        entity = {
-                            "name": record["name"],
-                            "type": record["type"],
-                            "description": record["description"],
-                            "source_url": record["source_url"]
-                        }
-                        if entity not in entities:
-                            entities.append(entity)
+                        name = record["name"]
+                        if name not in entity_names_set:
+                            entity_names_set.add(name)
+                            entities.append({
+                                "name": name,
+                                "type": record["type"],
+                                "description": record["description"],
+                                "source_url": record["source_url"]
+                            })
                 
-                # 查詢 3: 找出實體之間的關係
+                # 🔧 截斷到最大實體數
+                if len(entities) > self.max_total_entities:
+                    logger.info(f"      ⚠️ 實體數量超過限制，截斷至 {self.max_total_entities}")
+                    entities = entities[:self.max_total_entities]
+                
+                # 🔧 查詢 3: 找出實體之間的關係（使用所有實體，不限制為 20）
                 if entities:
-                    entity_names = [e["name"] for e in entities[:20]]  # 限制數量
+                    entity_names = list(entity_names_set)
                     
-                    result = session.run("""
-                        MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity)
-                        WHERE e1.name IN $names AND e2.name IN $names
-                        RETURN e1.name as source,
-                               e2.name as target,
-                               r.type as relation_type,
-                               r.description as description
-                        LIMIT 20
-                    """, names=entity_names)
-                    
-                    for record in result:
-                        relationships.append({
-                            "source": record["source"],
-                            "target": record["target"],
-                            "relation": record["relation_type"],
-                            "description": record["description"]
-                        })
+                    # 分批查詢以避免查詢過大
+                    batch_size = 50
+                    for i in range(0, len(entity_names), batch_size):
+                        batch = entity_names[i:i+batch_size]
+                        
+                        result = session.run("""
+                            MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity)
+                            WHERE e1.name IN $names AND e2.name IN $names
+                            RETURN e1.name as source,
+                                   e2.name as target,
+                                   r.type as relation_type,
+                                   r.description as description
+                            LIMIT $limit
+                        """, names=batch, limit=self.max_relationships)
+                        
+                        for record in result:
+                            relationships.append({
+                                "source": record["source"],
+                                "target": record["target"],
+                                "relation": record["relation_type"],
+                                "description": record["description"]
+                            })
+                        
+                        # 如果已經達到最大關係數，停止查詢
+                        if len(relationships) >= self.max_relationships:
+                            logger.info(f"      ⚠️ 關係數量達到限制 {self.max_relationships}")
+                            break
             
             driver.close()
             
-            logger.info(f"      ✅ Neo4j 查詢完成")
+            logger.info(f"      ✅ Neo4j 查詢完成: {len(entities)} 實體, {len(relationships)} 關係")
             
             return {
                 "entities": entities,
@@ -190,11 +212,12 @@ class ReportGenerator:
         """
         # 簡單的關鍵詞提取（可以改進為使用 NLP）
         # 移除常見停用詞
-        stopwords = {'的', '是', '和', '與', '或', '在', '了', '有', '為', '等'}
+        stopwords = {'的', '是', '和', '與', '或', '在', '了', '有', '為', '等', 
+                     'the', 'is', 'and', 'or', 'in', 'at', 'to', 'a', 'an'}
         
         # 分割並過濾
         words = query.split()
-        keywords = [w for w in words if w not in stopwords and len(w) > 1]
+        keywords = [w for w in words if w.lower() not in stopwords and len(w) > 1]
         
         # 如果沒有關鍵詞，使用整個查詢
         if not keywords:
@@ -209,13 +232,13 @@ class ReportGenerator:
         neo4j_data: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        整合來自不同來源的資料
+        🔧 優化：整合來自不同來源的資料，不再限制數量
         """
         integrated = {
             "query": query,
-            "search_results": search_results[:5] if search_results else [],  # 限制數量
-            "neo4j_entities": neo4j_data.get("entities", [])[:10],  # 最多 10 個實體
-            "neo4j_relationships": neo4j_data.get("relationships", [])[:10],  # 最多 10 個關係
+            "search_results": search_results[:10] if search_results else [],  # 稍微提高搜尋結果
+            "neo4j_entities": neo4j_data.get("entities", []),  # 🔧 不限制
+            "neo4j_relationships": neo4j_data.get("relationships", []),  # 🔧 不限制
         }
         
         return integrated
@@ -238,29 +261,46 @@ class ReportGenerator:
     
     def _build_report_prompt(self, query: str, sources: Dict[str, Any]) -> str:
         """
-        構建用於生成報告的 prompt
+        🔧 優化：構建用於生成報告的 prompt，顯示更多實體和關係
         """
-        # 準備實體資訊
+        # 準備實體資訊（顯示更多）
         entities_info = ""
-        if sources.get("neo4j_entities"):
-            entities_info = "知識庫中的相關實體:\n"
-            for i, entity in enumerate(sources["neo4j_entities"][:10], 1):
-                entities_info += f"{i}. {entity['name']} ({entity['type']}): {entity.get('description', 'N/A')[:100]}\n"
+        entities = sources.get("neo4j_entities", [])
+        if entities:
+            entities_info = f"知識庫中的相關實體 (共 {len(entities)} 個):\n"
+            # 🔧 顯示更多實體（最多 30 個）
+            for i, entity in enumerate(entities[:30], 1):
+                entities_info += f"{i}. {entity['name']} ({entity['type']})"
+                if entity.get('description'):
+                    entities_info += f": {entity.get('description', '')[:150]}"
+                entities_info += "\n"
+            
+            if len(entities) > 30:
+                entities_info += f"... 以及其他 {len(entities) - 30} 個實體\n"
         
-        # 準備關係資訊
+        # 準備關係資訊（顯示更多）
         relationships_info = ""
-        if sources.get("neo4j_relationships"):
-            relationships_info = "\n實體之間的關係:\n"
-            for i, rel in enumerate(sources["neo4j_relationships"][:5], 1):
-                relationships_info += f"{i}. {rel['source']} --[{rel['relation']}]--> {rel['target']}\n"
+        relationships = sources.get("neo4j_relationships", [])
+        if relationships:
+            relationships_info = f"\n實體之間的關係 (共 {len(relationships)} 個):\n"
+            # 🔧 顯示更多關係（最多 20 個）
+            for i, rel in enumerate(relationships[:20], 1):
+                relationships_info += f"{i}. {rel['source']} --[{rel['relation']}]--> {rel['target']}"
+                if rel.get('description'):
+                    relationships_info += f" ({rel['description'][:100]})"
+                relationships_info += "\n"
+            
+            if len(relationships) > 20:
+                relationships_info += f"... 以及其他 {len(relationships) - 20} 個關係\n"
         
         # 準備搜尋結果
         search_info = ""
-        if sources.get("search_results"):
+        search_results = sources.get("search_results", [])
+        if search_results:
             search_info = "\n最新搜尋結果:\n"
-            for i, result in enumerate(sources["search_results"][:3], 1):
+            for i, result in enumerate(search_results[:5], 1):
                 search_info += f"{i}. {result.get('title', 'N/A')}\n"
-                search_info += f"   摘要: {result.get('snippet', 'N/A')[:150]}\n"
+                search_info += f"   摘要: {result.get('snippet', 'N/A')[:200]}\n"
         
         # 構建完整 prompt
         prompt = f"""你是一位專業的研究員。請基於以下資訊，用繁體中文(zh-tw)撰寫一份關於「{query}」的詳細研究報告。
@@ -292,6 +332,7 @@ class ReportGenerator:
    - 明確的回覆使用者所的問題
 
 請確保報告：
+- 充分利用提供的所有 {len(entities)} 個實體和 {len(relationships)} 個關係
 - 基於提供的資料
 - 客觀且有依據
 - 結構清晰
@@ -301,6 +342,7 @@ class ReportGenerator:
 """
         
         return prompt
+    
     def generate_report_from_extraction(
         self,
         query: str,
@@ -309,18 +351,18 @@ class ReportGenerator:
         search_results: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        ✅ 直接使用萃取的實體和關係生成報告
+        🔧 優化：直接使用萃取的實體和關係生成報告，不限制數量
         避免萃取完成後立即查詢 Neo4j 的時間差問題
         """
         logger.info(f"📝 使用萃取結果生成報告: {query}")
         logger.info(f"   📊 實體: {len(entities)}, 關係: {len(relationships)}")
         
-        # 構建資料源
+        # 構建資料源（🔧 不限制數量）
         sources = {
             "query": query,
-            "search_results": search_results[:5] if search_results else [],
-            "neo4j_entities": entities[:20],  # 使用萃取的實體
-            "neo4j_relationships": relationships[:20]  # 使用萃取的關係
+            "search_results": search_results[:10] if search_results else [],
+            "neo4j_entities": entities,  # 🔧 使用所有實體
+            "neo4j_relationships": relationships  # 🔧 使用所有關係
         }
         
         # 生成報告
@@ -341,9 +383,10 @@ class ReportGenerator:
         logger.info(f"   ✅ 報告生成完成，長度: {len(report)} 字元")
         
         return result
-    def _call_ollama(self, prompt: str, max_tokens: int = 2000) -> str:
+    
+    def _call_ollama(self, prompt: str, max_tokens: int = 3000) -> str:
         """
-        呼叫 Ollama API 生成文本
+        🔧 優化：增加 max_tokens 以支援更長的報告
         """
         try:
             response = requests.post(
@@ -353,12 +396,12 @@ class ReportGenerator:
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "temperature": 0.7,  # 中等創造性
-                        "num_predict": max_tokens,
+                        "temperature": 0.7,
+                        "num_predict": max_tokens,  # 🔧 提高到 3000
                         "top_p": 0.9
                     }
                 },
-                timeout=60  # 增加超時時間
+                timeout=120  # 🔧 增加超時時間到 2 分鐘
             )
             response.raise_for_status()
             return response.json().get("response", "")
@@ -376,19 +419,23 @@ class ReportGenerator:
         # 實體摘要
         entities = sources.get("neo4j_entities", [])
         if entities:
-            report += "## 相關實體\n\n"
-            for entity in entities[:5]:
+            report += f"## 相關實體 (共 {len(entities)} 個)\n\n"
+            for entity in entities[:10]:
                 report += f"- **{entity['name']}** ({entity['type']})\n"
                 if entity.get('description'):
                     report += f"  {entity['description'][:100]}...\n"
+            if len(entities) > 10:
+                report += f"\n... 以及其他 {len(entities) - 10} 個實體\n"
             report += "\n"
         
         # 關係摘要
         relationships = sources.get("neo4j_relationships", [])
         if relationships:
-            report += "## 實體關係\n\n"
-            for rel in relationships[:5]:
+            report += f"## 實體關係 (共 {len(relationships)} 個)\n\n"
+            for rel in relationships[:10]:
                 report += f"- {rel['source']} → {rel['relation']} → {rel['target']}\n"
+            if len(relationships) > 10:
+                report += f"\n... 以及其他 {len(relationships) - 10} 個關係\n"
             report += "\n"
         
         # 搜尋結果
