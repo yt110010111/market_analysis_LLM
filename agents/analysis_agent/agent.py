@@ -1,7 +1,7 @@
-# agents/analysis_agent/agent.py
 import logging
 from typing import Dict, Any, List
 import requests
+import json
 from report_generator import ReportGenerator
 
 logging.basicConfig(level=logging.INFO)
@@ -10,185 +10,314 @@ logger = logging.getLogger(__name__)
 
 class AnalysisAgent:
     """
-    分析代理：分析搜尋結果並協調工作流
+    分析代理：使用 LLM 判斷資料充足度並協調工作流
     """
     
     def __init__(self):
         self.report_generator = ReportGenerator()
         self.web_scraping_url = "http://web_scraping_agent:8003"
         self.data_extraction_url = "http://data_extraction_agent:8004"
+        self.ollama_endpoint = "http://ollama:11434"
+        self.model_name = "llama3.2:3b"
+        self.max_iterations = 3  # 最多迭代 3 次
     
-    def analyze_search_results(self, search_results: Dict[str, Any]) -> Dict[str, Any]:
+    def _query_ollama(self, prompt: str, temperature: float = 0.3) -> str:
         """
-        分析搜尋結果並決定下一步行動
-        
-        策略：
-        1. 檢查資料庫中是否已有足夠資料
-        2. 如果有 -> 直接生成報告
-        3. 如果沒有 -> 執行爬蟲和萃取流程
-        """
-        query = search_results.get("query", "")
-        results = search_results.get("results", [])
-        
-        logger.info(f"🔍 分析搜尋結果: {query}")
-        logger.info(f"   找到 {len(results)} 個搜尋結果")
-        
-        # 檢查資料庫覆蓋度
-        coverage = self._check_database_coverage(query, results)
-        
-        if coverage["has_sufficient_data"]:
-            logger.info("   ✅ 資料庫資料充足，直接生成報告")
-            return {
-                "action": "generate_report",
-                "query": query,
-                "reason": "資料庫中已有足夠的相關資料",
-                "coverage": coverage,
-                "search_results": results
-            }
-        else:
-            logger.info("   ⚠️ 資料庫資料不足，需要爬取網頁")
-            return {
-                "action": "scrape_and_extract",
-                "query": query,
-                "reason": "需要從網頁爬取更多資料",
-                "coverage": coverage,
-                "urls_to_scrape": [r.get("url") for r in results[:5]],  # 限制 5 個
-                "search_results": results
-            }
-    
-    def _check_database_coverage(self, query: str, results: List[Dict]) -> Dict[str, Any]:
-        """
-        檢查 Neo4j 資料庫中是否有足夠的相關資料
+        呼叫 Ollama API
         """
         try:
-            # 使用 report_generator 的 Neo4j 查詢方法
-            neo4j_data = self.report_generator._query_neo4j_knowledge(query)
-            
-            entity_count = neo4j_data.get("entity_count", 0)
-            relationship_count = neo4j_data.get("relationship_count", 0)
-            
-            # 判斷標準：至少 3 個實體或 2 個關係
-            has_sufficient_data = entity_count >= 3 or relationship_count >= 2
-            
-            return {
-                "has_sufficient_data": has_sufficient_data,
-                "entity_count": entity_count,
-                "relationship_count": relationship_count,
-                "threshold": {"min_entities": 3, "min_relationships": 2}
+            response = requests.post(
+                f"{self.ollama_endpoint}/api/generate",
+                json={
+                    "model": self.model_name,
+                    "prompt": prompt,
+                    "temperature": temperature,
+                    "stream": False
+                },
+                timeout=60
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result.get("response", "").strip()
+        except Exception as e:
+            logger.error(f"❌ Ollama 呼叫失敗: {e}")
+            raise
+    
+    def _check_data_sufficiency_with_llm(
+        self, 
+        query: str, 
+        entities: List[Dict], 
+        relationships: List[Dict],
+        iteration: int = 0
+    ) -> Dict[str, Any]:
+        """
+        使用 LLM 判斷資料是否充足以撰寫報告
+        
+        Returns:
+            {
+                "is_sufficient": bool,
+                "reason": str,
+                "missing_aspects": List[str],
+                "confidence": float
             }
+        """
+        # 構建實體摘要
+        entity_summary = self._summarize_entities(entities)
+        relationship_summary = self._summarize_relationships(relationships)
+        
+        prompt = f"""你是一個專業的市場分析助理。請判斷以下資料是否足以撰寫一份完整的市場分析報告。
+
+查詢主題: {query}
+
+目前收集的資料:
+- 實體數量: {len(entities)}
+- 關係數量: {len(relationships)}
+- 迭代次數: {iteration + 1}/{self.max_iterations}
+
+實體摘要:
+{entity_summary}
+
+關係摘要:
+{relationship_summary}
+
+請評估:
+1. 資料是否涵蓋主題的核心面向？
+2. 是否有足夠的細節支撐分析？
+3. 關係是否足以建立因果或關聯分析？
+4. 還缺少哪些重要資訊？
+
+請以 JSON 格式回應（只回傳 JSON，不要其他文字）:
+{{
+    "is_sufficient": true/false,
+    "confidence": 0.0-1.0,
+    "reason": "簡短說明",
+    "missing_aspects": ["缺少的面向1", "缺少的面向2"],
+    "coverage_score": 0-100
+}}"""
+
+        try:
+            llm_response = self._query_ollama(prompt, temperature=0.3)
+            
+            # 嘗試解析 JSON
+            # 移除可能的 markdown 標記
+            llm_response = llm_response.replace("```json", "").replace("```", "").strip()
+            
+            result = json.loads(llm_response)
+            
+            logger.info(f"🤖 LLM 判斷結果:")
+
+            logger.info(f"   原因: {result.get('reason', 'N/A')}")
+            if result.get('missing_aspects'):
+                logger.info(f"   缺少面向: {', '.join(result.get('missing_aspects', []))}")
+            
+            return result
+            
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ LLM 回應解析失敗: {e}")
+            logger.warning(f"   原始回應: {llm_response[:200]}")
+            
+            # 降級處理：使用簡單規則
+            return self._fallback_sufficiency_check(entities, relationships)
+        except Exception as e:
+            logger.error(f"❌ LLM 判斷失敗: {e}")
+            return self._fallback_sufficiency_check(entities, relationships)
+    
+    def _fallback_sufficiency_check(
+        self, 
+        entities: List[Dict], 
+        relationships: List[Dict]
+    ) -> Dict[str, Any]:
+        """
+        降級方案：使用簡單規則判斷
+        """
+        entity_count = len(entities)
+        rel_count = len(relationships)
+        
+        # 簡單規則：至少 5 個實體和 3 個關係
+        is_sufficient = entity_count >= 5 and rel_count >= 3
+        coverage_score = min(100, (entity_count * 10 + rel_count * 15))
+        
+        return {
+            "is_sufficient": is_sufficient,
+            "confidence": 0.6,
+            "reason": f"基於規則判斷：{entity_count} 實體, {rel_count} 關係",
+            "missing_aspects": ["需要更多資料"] if not is_sufficient else [],
+            "coverage_score": coverage_score
+        }
+    
+    def _summarize_entities(self, entities: List[Dict]) -> str:
+        """
+        摘要實體資訊
+        """
+        if not entities:
+            return "無實體資料"
+        
+        # 統計實體類型
+        type_counts = {}
+        for entity in entities[:20]:  # 只看前 20 個
+            entity_type = entity.get("type", "Unknown")
+            type_counts[entity_type] = type_counts.get(entity_type, 0) + 1
+        
+        summary_lines = [f"- {type_}: {count} 個" for type_, count in type_counts.items()]
+        
+        # 列出一些實體名稱
+        sample_names = [e.get("name", "N/A") for e in entities[:5]]
+        summary_lines.append(f"範例: {', '.join(sample_names)}")
+        
+        return "\n".join(summary_lines)
+    
+    def _summarize_relationships(self, relationships: List[Dict]) -> str:
+        """
+        摘要關係資訊
+        """
+        if not relationships:
+            return "無關係資料"
+        
+        # 統計關係類型
+        type_counts = {}
+        for rel in relationships[:20]:  # 只看前 20 個
+            rel_type = rel.get("type", "Unknown")
+            type_counts[rel_type] = type_counts.get(rel_type, 0) + 1
+        
+        summary_lines = [f"- {type_}: {count} 個" for type_, count in type_counts.items()]
+        
+        return "\n".join(summary_lines)
+    
+    def _generate_search_queries(self, query: str, missing_aspects: List[str]) -> List[str]:
+        """
+        根據缺少的面向生成新的搜尋查詢
+        """
+        if not missing_aspects:
+            return [query]
+        
+        prompt = f"""基於以下資訊，生成 2-3 個更具體的搜尋查詢來補充缺少的資訊。
+
+原始查詢: {query}
+缺少的面向: {', '.join(missing_aspects)}
+
+請生成能夠找到這些缺少資訊的搜尋查詢。
+格式: 每行一個查詢，不要編號或其他標記。
+範例:
+台灣 AI 產業 供應鏈
+台灣 AI 晶片 市場規模
+台灣 AI 新創公司"""
+
+        try:
+            llm_response = self._query_ollama(prompt, temperature=0.7)
+            queries = [q.strip() for q in llm_response.split("\n") if q.strip()]
+            queries = queries[:3]  # 最多 3 個
+            
+            logger.info(f"🔍 生成新搜尋查詢: {queries}")
+            return queries
             
         except Exception as e:
-            logger.warning(f"   ⚠️ 檢查資料庫覆蓋度失敗: {e}")
-            # 如果檢查失敗，預設為需要爬取
-            return {
-                "has_sufficient_data": False,
-                "entity_count": 0,
-                "relationship_count": 0,
-                "error": str(e)
-            }
+            logger.warning(f"⚠️ 生成搜尋查詢失敗: {e}")
+            return [query]
     
     async def orchestrate_workflow(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """
-        根據 action 執行相應的工作流
+        迭代式工作流：不斷搜尋直到資料充足
         
-        返回格式：
-        {
-            "status": "success",
-            "report": "...",
-            "query": "...",
-            "sources": {...}
-        }
+        流程:
+        1. 檢查現有資料
+        2. LLM 判斷是否充足
+        3. 如果不足 → 搜尋 + 爬取 + 萃取 → 回到步驟 2
+        4. 如果充足或達到最大迭代次數 → 生成報告
         """
-        action = request.get("action")
         query = request.get("query")
+        action = request.get("action")
         
-        logger.info(f"🎬 開始執行工作流: {action}")
+        logger.info(f"🎬 開始執行迭代式工作流: {query}")
+        
+        all_scraped_results = []
+        iteration = 0
         
         try:
-            if action == "generate_report":
-                # 直接生成報告
-                search_results = request.get("search_results", [])
-                report_data = self.report_generator.generate_comprehensive_report(
-                    query=query,
-                    search_results=search_results,
-                    use_neo4j=True
+            while iteration < self.max_iterations:
+                logger.info(f"\n{'='*60}")
+                logger.info(f"📍 迭代 {iteration + 1}/{self.max_iterations}")
+                logger.info(f"{'='*60}")
+                
+                # ============ 步驟 1: 查詢現有資料 ============
+                logger.info(f"🔍 步驟 1: 查詢 Neo4j 現有資料")
+                neo4j_data = self.report_generator._query_neo4j_knowledge(query)
+                entities = neo4j_data.get("entities", [])
+                relationships = neo4j_data.get("relationships", [])
+                
+                logger.info(f"📊 當前資料: {len(entities)} 實體, {len(relationships)} 關係")
+                
+                # ============ 步驟 2: LLM 判斷充足度 ============
+                logger.info(f"🤖 步驟 2: LLM 判斷資料充足度")
+                sufficiency = self._check_data_sufficiency_with_llm(
+                    query, entities, relationships, iteration
                 )
                 
-                logger.info(f"✅ 報告生成完成")
-                return {
-                    "status": "success",
-                    "action": "generate_report",
-                    "report": report_data["report"],
-                    "query": query,
-                    "sources": report_data["sources"],
-                    "generated_at": report_data["generated_at"]
-                }
+                # ============ 步驟 3: 決定是否繼續 ============
+                if sufficiency.get("is_sufficient", False):
+                    logger.info(f"✅ LLM 判斷資料充足，開始生成報告")
+                    break
                 
-            elif action == "scrape_and_extract":
-                # 執行完整流程：Tavily 搜尋 + 爬蟲 -> 萃取 -> 儲存 -> 生成報告
+                if iteration >= self.max_iterations - 1:
+                    logger.info(f"⚠️ 已達最大迭代次數，強制生成報告")
+                    break
                 
-                # 步驟 1: 使用 Tavily 搜尋並爬取網頁
-                logger.info(f"   🔍 步驟 1: 使用 Tavily 搜尋並爬取網頁")
-                scraped_data = await self._search_and_scrape(query)
+                # ============ 步驟 4: 生成新搜尋查詢 ============
+                logger.info(f"📝 步驟 3: 生成補充搜尋查詢")
+                missing_aspects = sufficiency.get("missing_aspects", [])
+                search_queries = self._generate_search_queries(query, missing_aspects)
                 
-                if not scraped_data.get("results"):
-                    logger.warning("   ⚠️ 未找到任何網頁資料")
-                    report_data = self.report_generator.generate_comprehensive_report(
-                        query=query,
-                        search_results=[],
-                        use_neo4j=True
-                    )
-                    return {
-                        "status": "success",
-                        "action": "scrape_and_extract",
-                        "report": report_data["report"],
-                        "query": query,
-                        "sources": report_data["sources"],
-                        "workflow_steps": {
-                            "scraped_urls": 0,
-                            "extracted_entities": 0,
-                            "note": "未找到新資料，使用現有資料庫生成報告"
-                        },
-                        "generated_at": report_data["generated_at"]
-                    }
+                # ============ 步驟 5: 搜尋 + 爬取 ============
+                logger.info(f"🔍 步驟 4: 執行搜尋和爬取")
+                for search_query in search_queries:
+                    logger.info(f"   搜尋: {search_query}")
+                    scraped_data = await self._search_and_scrape(search_query)
+                    
+                    if scraped_data.get("results"):
+                        all_scraped_results.extend(scraped_data.get("results", []))
+                        
+                        # ============ 步驟 6: 萃取並存入 Neo4j ============
+                        logger.info(f"   🔬 萃取資料並存入 Neo4j")
+                        await self._extract_data(query, scraped_data)
                 
-                # 步驟 2: 萃取結構化資料（萃取 agent 會自動存入 Neo4j）
-                logger.info(f"   🔬 步驟 2: 萃取結構化資料並存入 Neo4j")
-                extracted_data = await self._extract_data(query, scraped_data)
-                
-                # ✅ 關鍵修改：直接使用萃取結果，不再查詢 Neo4j
-                entities = extracted_data.get("entities", [])
-                relationships = extracted_data.get("relationships", [])
-                
-                logger.info(f"   📝 步驟 3: 使用萃取結果生成報告")
-                logger.info(f"   📊 使用 {len(entities)} 個實體和 {len(relationships)} 個關係")
-                
-                # 直接傳遞萃取的實體和關係給報告生成器
-                report_data = self.report_generator.generate_report_from_extraction(
-                    query=query,
-                    entities=entities,
-                    relationships=relationships,
-                    search_results=scraped_data.get("results", [])
-                )
-                
-                logger.info(f"✅ 完整工作流執行完成")
-                return {
-                    "status": "success",
-                    "action": "scrape_and_extract",
-                    "report": report_data["report"],
-                    "query": query,
-                    "sources": report_data["sources"],
-                    "workflow_steps": {
-                        "scraped_urls": len(scraped_data.get("results", [])),
-                        "extracted_entities": len(entities),
-                        "extracted_relationships": len(relationships)
-                    },
-                    "generated_at": report_data["generated_at"]
-                }
+                iteration += 1
             
-            else:
-                raise ValueError(f"Unknown action: {action}")
-                
+            # ============ 最終步驟: 生成報告 ============
+            logger.info(f"\n{'='*60}")
+            logger.info(f"📝 最終步驟: 生成報告")
+            logger.info(f"{'='*60}")
+            
+            # 重新查詢最終資料
+            final_neo4j_data = self.report_generator._query_neo4j_knowledge(query)
+            final_entities = final_neo4j_data.get("entities", [])
+            final_relationships = final_neo4j_data.get("relationships", [])
+            
+            logger.info(f"📊 最終資料: {len(final_entities)} 實體, {len(final_relationships)} 關係")
+            
+            report_data = self.report_generator.generate_report_from_extraction(
+                query=query,
+                entities=final_entities,
+                relationships=final_relationships,
+                search_results=all_scraped_results
+            )
+            
+            logger.info(f"✅ 報告生成完成")
+            
+            return {
+                "status": "success",
+                "action": action,
+                "report": report_data["report"],
+                "query": query,
+                "sources": report_data["sources"],
+                "workflow_steps": {
+                    "iterations": iteration + 1,
+                    "total_scraped_urls": len(all_scraped_results),
+                    "final_entities": len(final_entities),
+                    "final_relationships": len(final_relationships),
+                    "sufficiency_score": sufficiency.get("coverage_score", 0)
+                },
+                "generated_at": report_data["generated_at"]
+            }
+            
         except Exception as e:
             logger.error(f"❌ 工作流執行失敗: {e}", exc_info=True)
             return {
@@ -201,40 +330,26 @@ class AnalysisAgent:
     
     async def _search_and_scrape(self, query: str) -> Dict[str, Any]:
         """
-        🆕 使用 Tavily 搜尋並爬取網頁（一次完成）
-        
-        這個方法會：
-        1. 調用 web_scraping_agent
-        2. 傳入 query 和 dynamic_search=True
-        3. web_scraping_agent 會自動用 Tavily 搜尋並爬取
-        
-        返回格式：
-        {
-            "query": str,
-            "total_urls": int,
-            "successful": int,
-            "failed": int,
-            "results": [...]
-        }
+        使用 Tavily 搜尋並爬取網頁
         """
         try:
             response = requests.post(
                 f"{self.web_scraping_url}/scrape",
                 json={
-                    "urls": [],  # 空列表，讓它自己用 Tavily 搜尋
+                    "urls": [],
                     "query": query,
-                    "dynamic_search": True  # 啟用 Tavily
+                    "dynamic_search": True
                 },
                 timeout=60
             )
             response.raise_for_status()
             result = response.json()
             
-            logger.info(f"   ✅ 搜尋並爬取完成: {result.get('successful', 0)} 個成功")
+            logger.info(f"   ✅ 爬取完成: {result.get('successful', 0)} 個成功")
             return result
             
         except Exception as e:
-            logger.error(f"   ❌ 搜尋並爬取失敗: {e}")
+            logger.error(f"   ❌ 搜尋爬取失敗: {e}")
             return {"results": []}
     
     async def _extract_data(self, query: str, scraped_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -253,33 +368,15 @@ class AnalysisAgent:
             response.raise_for_status()
             result = response.json()
             
-            # 記錄成功訊息
             stats = result.get("statistics", {})
             entity_count = stats.get("total_entities", 0)
             rel_count = stats.get("total_relationships", 0)
             logger.info(f"   ✅ 萃取成功: {entity_count} 個實體, {rel_count} 個關係")
             
-            # ✅ 檢查 Neo4j 存儲狀態
-            storage_status = result.get("neo4j_storage", {})
-            if storage_status.get("status") == "error":
-                logger.warning(f"   ⚠️ Neo4j 存儲失敗: {storage_status.get('error')}")
-            elif storage_status.get("status") == "success":
-                logger.info(f"   ✅ Neo4j 存儲成功: {storage_status.get('entities_stored')} 實體, {storage_status.get('relationships_stored')} 關係")
-            
             return result
             
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"   ❌ 資料萃取失敗: {e.response.status_code} - {e.response.text}")
-            # ✅ 返回空結果而不是拋出異常
-            return {
-                "entities": [],
-                "relationships": [],
-                "statistics": {"total_entities": 0, "total_relationships": 0},
-                "error": str(e)
-            }
         except Exception as e:
             logger.error(f"   ❌ 資料萃取失敗: {e}")
-            # ✅ 返回空結果而不是拋出異常
             return {
                 "entities": [],
                 "relationships": [],
