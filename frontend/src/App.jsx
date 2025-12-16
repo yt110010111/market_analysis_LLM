@@ -20,56 +20,57 @@ function App() {
       return;
     }
 
+    // ✅ 防止重複提交
+    if (isLoading) {
+      return;
+    }
+
     setIsLoading(true);
     setReportTitle(userInput);
     setError('');
     setReportContent('');
+    setShowReport(true); // ✅ 立即顯示報告面板（顯示 loading）
 
     try {
-      // 步驟 1: 發送搜尋請求
-      console.log('步驟 1: 發送搜尋請求...');
-      const searchResponse = await axios.post('/api/analyze', {
+      // ✅ 只需要一次請求！後端會自動處理整個工作流
+      console.log('發送分析請求:', userInput);
+      
+      const response = await axios.post('/api/analyze', {
         query: userInput
+      }, {
+        timeout: 180000  // ✅ 設置 3 分鐘超時（因為工作流可能需要時間）
       });
 
-      console.log('搜尋結果:', searchResponse.data);
+      console.log('收到報告:', response.data);
 
-      // 步驟 2: 分析搜尋結果
-      console.log('步驟 2: 分析搜尋結果...');
-      const analysisResponse = await axios.post('/api/analyze', {
-        query: userInput,
-        results: searchResponse.data.results || []
-      });
-
-      console.log('分析結果:', analysisResponse.data);
-
-      // 步驟 3: 執行工作流並生成報告
-      console.log('步驟 3: 生成報告...');
-      const orchestrateResponse = await axios.post('/api/orchestrate', {
-        action: analysisResponse.data.action,
-        query: userInput,
-        search_results: searchResponse.data.results || [],
-        urls_to_scrape: analysisResponse.data.details?.urls_to_scrape || []
-      });
-
-      console.log('報告結果:', orchestrateResponse.data);
-
-      // 檢查是否有報告內容
-      if (orchestrateResponse.data.report) {
-        setReportContent(orchestrateResponse.data.report);
-        setReportSources(orchestrateResponse.data.sources);
-        setShowReport(true);
+      // ✅ 檢查是否有報告內容
+      if (response.data.report) {
+        setReportContent(response.data.report);
+        setReportSources(response.data.sources);
       } else {
         throw new Error('服務器未返回報告內容');
       }
 
     } catch (error) {
       console.error('錯誤:', error);
-      setError(error.response?.data?.detail || error.message || '發生未知錯誤');
+      
+      let errorMessage = '發生未知錯誤';
+      
+      if (error.code === 'ECONNABORTED') {
+        errorMessage = '請求超時，請稍後再試';
+      } else if (error.response) {
+        errorMessage = error.response.data?.detail || error.response.statusText || '服務器錯誤';
+      } else if (error.request) {
+        errorMessage = '無法連接到服務器';
+      } else {
+        errorMessage = error.message;
+      }
+      
+      setError(errorMessage);
       
       // 顯示錯誤報告
-      setReportContent(`# 生成報告時發生錯誤\n\n${error.message}\n\n請稍後再試或聯繫管理員。`);
-      setShowReport(true);
+      setReportContent(`# 生成報告時發生錯誤\n\n${errorMessage}\n\n請稍後再試或聯繫管理員。`);
+      
     } finally {
       setIsLoading(false);
     }
@@ -79,6 +80,7 @@ function App() {
     setShowReport(false);
     setUserInput('');
     setReportContent('');
+    setReportSources(null);
     setError('');
   };
 
@@ -102,7 +104,7 @@ function App() {
             <button 
               type="submit" 
               className="submit-button"
-              disabled={isLoading}
+              disabled={isLoading || !userInput.trim()}  // ✅ 空輸入也禁用
             >
               {isLoading ? (
                 <>
@@ -111,15 +113,15 @@ function App() {
                 </>
               ) : (
                 <>
-                  <span> 生成報告</span>
+                  <span>🔍 生成報告</span>
                 </>
               )}
             </button>
           </form>
 
-          {error && (
+          {error && !showReport && (  // ✅ 只在報告面板未顯示時顯示錯誤
             <div className="error-message">
-               錯誤：{error}
+              ⚠️ 錯誤：{error}
             </div>
           )}
         </div>
@@ -129,13 +131,23 @@ function App() {
       <div className={`report-panel ${showReport ? 'show' : ''}`}>
         <div className="report-header">
           <h2>{reportTitle}</h2>
-          <button className="close-button" onClick={handleClose}>
+          <button 
+            className="close-button" 
+            onClick={handleClose}
+            disabled={isLoading}  // ✅ 載入中不允許關閉
+          >
             ✕
           </button>
         </div>
         
         <div className="report-content">
-          {reportContent ? (
+          {isLoading ? (
+            <div className="loading-placeholder">
+              <div className="loading-spinner"></div>
+              <p> 正在搜尋並分析資料...</p>
+              <p className="loading-hint">檢索網頁中，請稍候</p>
+            </div>
+          ) : reportContent ? (
             <>
               {/* Markdown 渲染 */}
               <div className="markdown-content">
@@ -145,7 +157,7 @@ function App() {
               {/* 來源資訊 */}
               {reportSources && (
                 <div className="report-section sources-section">
-                  <h3> 資料來源統計</h3>
+                  <h3>📊 資料來源統計</h3>
                   <ul>
                     <li>搜尋結果: {reportSources.search_results_count} 條</li>
                     <li>知識庫實體: {reportSources.neo4j_entities} 個</li>
@@ -153,11 +165,17 @@ function App() {
                   </ul>
                 </div>
               )}
+
+              {/* 顯示錯誤（如果有） */}
+              {error && (
+                <div className="error-message" style={{ marginTop: '20px' }}>
+                  ⚠️ 注意：{error}
+                </div>
+              )}
             </>
           ) : (
-            <div className="loading-placeholder">
-              <div className="loading-spinner"></div>
-              <p> 正在生成精彩報告...</p>
+            <div className="error-message">
+              ⚠️ 未收到報告內容，請重試
             </div>
           )}
         </div>

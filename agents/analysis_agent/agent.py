@@ -94,7 +94,7 @@ class AnalysisAgent:
         返回格式：
         {
             "status": "success",
-            "report": "...",  # 關鍵！必須包含報告內容
+            "report": "...",
             "query": "...",
             "sources": {...}
         }
@@ -118,43 +118,70 @@ class AnalysisAgent:
                 return {
                     "status": "success",
                     "action": "generate_report",
-                    "report": report_data["report"],  # 這裡！
+                    "report": report_data["report"],
                     "query": query,
                     "sources": report_data["sources"],
                     "generated_at": report_data["generated_at"]
                 }
                 
             elif action == "scrape_and_extract":
-                # 執行完整流程：爬蟲 -> 萃取 -> 儲存 -> 生成報告
-                urls = request.get("urls_to_scrape", [])
+                # 執行完整流程：Tavily 搜尋 + 爬蟲 -> 萃取 -> 儲存 -> 生成報告
                 
-                # 步驟 1: 爬取網頁
-                logger.info(f"   📡 步驟 1: 爬取 {len(urls)} 個網頁")
-                scraped_data = await self._scrape_urls(urls)
+                # 步驟 1: 使用 Tavily 搜尋並爬取網頁
+                logger.info(f"   🔍 步驟 1: 使用 Tavily 搜尋並爬取網頁")
+                scraped_data = await self._search_and_scrape(query)
                 
-                # 步驟 2: 萃取結構化資料
-                logger.info(f"   🔬 步驟 2: 萃取結構化資料")
+                if not scraped_data.get("results"):
+                    logger.warning("   ⚠️ 未找到任何網頁資料")
+                    report_data = self.report_generator.generate_comprehensive_report(
+                        query=query,
+                        search_results=[],
+                        use_neo4j=True
+                    )
+                    return {
+                        "status": "success",
+                        "action": "scrape_and_extract",
+                        "report": report_data["report"],
+                        "query": query,
+                        "sources": report_data["sources"],
+                        "workflow_steps": {
+                            "scraped_urls": 0,
+                            "extracted_entities": 0,
+                            "note": "未找到新資料，使用現有資料庫生成報告"
+                        },
+                        "generated_at": report_data["generated_at"]
+                    }
+                
+                # 步驟 2: 萃取結構化資料（萃取 agent 會自動存入 Neo4j）
+                logger.info(f"   🔬 步驟 2: 萃取結構化資料並存入 Neo4j")
                 extracted_data = await self._extract_data(query, scraped_data)
                 
-                # 步驟 3: 生成報告（萃取 agent 已經儲存到 Neo4j）
-                logger.info(f"   📝 步驟 3: 生成最終報告")
-                search_results = request.get("search_results", [])
-                report_data = self.report_generator.generate_comprehensive_report(
+                # ✅ 關鍵修改：直接使用萃取結果，不再查詢 Neo4j
+                entities = extracted_data.get("entities", [])
+                relationships = extracted_data.get("relationships", [])
+                
+                logger.info(f"   📝 步驟 3: 使用萃取結果生成報告")
+                logger.info(f"   📊 使用 {len(entities)} 個實體和 {len(relationships)} 個關係")
+                
+                # 直接傳遞萃取的實體和關係給報告生成器
+                report_data = self.report_generator.generate_report_from_extraction(
                     query=query,
-                    search_results=search_results,
-                    use_neo4j=True
+                    entities=entities,
+                    relationships=relationships,
+                    search_results=scraped_data.get("results", [])
                 )
                 
                 logger.info(f"✅ 完整工作流執行完成")
                 return {
                     "status": "success",
                     "action": "scrape_and_extract",
-                    "report": report_data["report"],  # 這裡！
+                    "report": report_data["report"],
                     "query": query,
                     "sources": report_data["sources"],
                     "workflow_steps": {
-                        "scraped_urls": len(scraped_data),
-                        "extracted_entities": extracted_data.get("entity_count", 0)
+                        "scraped_urls": len(scraped_data.get("results", [])),
+                        "extracted_entities": len(entities),
+                        "extracted_relationships": len(relationships)
                     },
                     "generated_at": report_data["generated_at"]
                 }
@@ -172,33 +199,90 @@ class AnalysisAgent:
                 "report": f"# 報告生成失敗\n\n抱歉，生成報告時發生錯誤：{str(e)}"
             }
     
-    async def _scrape_urls(self, urls: List[str]) -> List[Dict[str, Any]]:
-        """呼叫 web_scraping_agent 爬取網頁"""
+    async def _search_and_scrape(self, query: str) -> Dict[str, Any]:
+        """
+        🆕 使用 Tavily 搜尋並爬取網頁（一次完成）
+        
+        這個方法會：
+        1. 調用 web_scraping_agent
+        2. 傳入 query 和 dynamic_search=True
+        3. web_scraping_agent 會自動用 Tavily 搜尋並爬取
+        
+        返回格式：
+        {
+            "query": str,
+            "total_urls": int,
+            "successful": int,
+            "failed": int,
+            "results": [...]
+        }
+        """
         try:
             response = requests.post(
                 f"{self.web_scraping_url}/scrape",
-                json={"urls": urls},
+                json={
+                    "urls": [],  # 空列表，讓它自己用 Tavily 搜尋
+                    "query": query,
+                    "dynamic_search": True  # 啟用 Tavily
+                },
                 timeout=60
             )
             response.raise_for_status()
-            return response.json().get("results", [])
+            result = response.json()
+            
+            logger.info(f"   ✅ 搜尋並爬取完成: {result.get('successful', 0)} 個成功")
+            return result
+            
         except Exception as e:
-            logger.error(f"   ❌ 爬蟲失敗: {e}")
-            return []
+            logger.error(f"   ❌ 搜尋並爬取失敗: {e}")
+            return {"results": []}
     
-    async def _extract_data(self, query: str, scraped_data: List[Dict]) -> Dict[str, Any]:
-        """呼叫 data_extraction_agent 萃取並儲存資料"""
+    async def _extract_data(self, query: str, scraped_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        呼叫 data_extraction_agent 萃取並儲存資料
+        """
         try:
             response = requests.post(
                 f"{self.data_extraction_url}/extract",
                 json={
-                    "query": query,
-                    "documents": scraped_data
+                    "data": scraped_data,
+                    "query": query
                 },
                 timeout=120
             )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            
+            # 記錄成功訊息
+            stats = result.get("statistics", {})
+            entity_count = stats.get("total_entities", 0)
+            rel_count = stats.get("total_relationships", 0)
+            logger.info(f"   ✅ 萃取成功: {entity_count} 個實體, {rel_count} 個關係")
+            
+            # ✅ 檢查 Neo4j 存儲狀態
+            storage_status = result.get("neo4j_storage", {})
+            if storage_status.get("status") == "error":
+                logger.warning(f"   ⚠️ Neo4j 存儲失敗: {storage_status.get('error')}")
+            elif storage_status.get("status") == "success":
+                logger.info(f"   ✅ Neo4j 存儲成功: {storage_status.get('entities_stored')} 實體, {storage_status.get('relationships_stored')} 關係")
+            
+            return result
+            
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"   ❌ 資料萃取失敗: {e.response.status_code} - {e.response.text}")
+            # ✅ 返回空結果而不是拋出異常
+            return {
+                "entities": [],
+                "relationships": [],
+                "statistics": {"total_entities": 0, "total_relationships": 0},
+                "error": str(e)
+            }
         except Exception as e:
             logger.error(f"   ❌ 資料萃取失敗: {e}")
-            return {"entity_count": 0, "error": str(e)}
+            # ✅ 返回空結果而不是拋出異常
+            return {
+                "entities": [],
+                "relationships": [],
+                "statistics": {"total_entities": 0, "total_relationships": 0},
+                "error": str(e)
+            }

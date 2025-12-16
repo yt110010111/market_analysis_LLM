@@ -20,6 +20,8 @@ Neo4j graph database service used to store and query structured knowledge for Gr
 Access URL: http://140.113.73.25:7474/browser/  
 Account: `neo4j`  
 Password: `password123`
+MATCH (n)
+DETACH DELETE n;
 
 ### web_search_agent
 External query entry service responsible for web search, query expansion, and coordination with the Analysis Agent.

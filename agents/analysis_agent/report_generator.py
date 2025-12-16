@@ -301,7 +301,46 @@ class ReportGenerator:
 """
         
         return prompt
-    
+    def generate_report_from_extraction(
+        self,
+        query: str,
+        entities: List[Dict[str, Any]],
+        relationships: List[Dict[str, Any]],
+        search_results: List[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        ✅ 直接使用萃取的實體和關係生成報告
+        避免萃取完成後立即查詢 Neo4j 的時間差問題
+        """
+        logger.info(f"📝 使用萃取結果生成報告: {query}")
+        logger.info(f"   📊 實體: {len(entities)}, 關係: {len(relationships)}")
+        
+        # 構建資料源
+        sources = {
+            "query": query,
+            "search_results": search_results[:5] if search_results else [],
+            "neo4j_entities": entities[:20],  # 使用萃取的實體
+            "neo4j_relationships": relationships[:20]  # 使用萃取的關係
+        }
+        
+        # 生成報告
+        logger.info(f"   🤖 呼叫 Ollama 生成報告...")
+        report = self._generate_report_with_llm(query, sources)
+        
+        result = {
+            "query": query,
+            "report": report,
+            "sources": {
+                "search_results_count": len(search_results) if search_results else 0,
+                "neo4j_entities": len(entities),
+                "neo4j_relationships": len(relationships)
+            },
+            "generated_at": datetime.utcnow().isoformat() + "Z"
+        }
+        
+        logger.info(f"   ✅ 報告生成完成，長度: {len(report)} 字元")
+        
+        return result
     def _call_ollama(self, prompt: str, max_tokens: int = 2000) -> str:
         """
         呼叫 Ollama API 生成文本
