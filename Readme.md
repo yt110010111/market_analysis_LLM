@@ -5,7 +5,8 @@ This project implements an **agentic, multi-stage LLM system** designed for end-
 User queries are processed through a structured workflow that includes web search, content scraping, semantic analysis, data extraction, and graph-based reasoning. Large Language Models are served via Ollama, while Neo4j is used to persist extracted knowledge and relationships, enabling iterative reasoning and retrieval-augmented generation (Graph-RAG).
 
 By decomposing responsibilities across domain-specific agents, the system improves reliability, observability, and extensibility, making it suitable for research, market analysis, and complex knowledge-intensive applications.
-
+## System flows
+![img](mp.png)
 ## Quick start
 After you clone this repo, 
 ### 申請tavily API key
