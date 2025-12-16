@@ -6,6 +6,24 @@ User queries are processed through a structured workflow that includes web searc
 
 By decomposing responsibilities across domain-specific agents, the system improves reliability, observability, and extensibility, making it suitable for research, market analysis, and complex knowledge-intensive applications.
 
+## Quick start
+After you clone this repo, 
+### 申請tavily API key
+```
+https://app.tavily.com/home
+```
+docker-compose.yml:
+environment替換:
+```
+-TAVILY_API_KEY=your_api_key
+and then run 
+```
+docker compose down
+docker compose build
+docker compose up
+```
+Can access front end by port3000 and database by port 7474
+
 ## Services
 All services were composed in different container
 ## Services Architecture
@@ -22,9 +40,6 @@ Account: `neo4j`
 Password: `password123`
 MATCH (n)
 DETACH DELETE n;
-
-### web_search_agent
-External query entry service responsible for web search, query expansion, and coordination with the Analysis Agent.
 
 ### analysis_agent
 Core reasoning agent that orchestrates the inference workflow. It integrates search results, performs graph queries on Neo4j, and invokes downstream agents such as web scraping and data extraction.
@@ -52,12 +67,5 @@ docker-compose logs -f container
 ```
 
 
-### 申請tavily API key
-```
-https://app.tavily.com/home
-```
-docker-compose.yml:
-environment替換:
-```
--TAVILY_API_KEY=your_api_key
+
 ```

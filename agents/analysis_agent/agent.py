@@ -3,8 +3,9 @@ from typing import Dict, Any, List
 import requests
 import json
 from report_generator import ReportGenerator
+import config
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
 
@@ -15,16 +16,25 @@ class AnalysisAgent:
     
     def __init__(self):
         self.report_generator = ReportGenerator()
-        self.web_scraping_url = "http://web_scraping_agent:8003"
-        self.data_extraction_url = "http://data_extraction_agent:8004"
-        self.ollama_endpoint = "http://ollama:11434"
-        self.model_name = "llama3.2:3b"
-        self.max_iterations = 3  # 最多迭代 3 次
+        self.web_scraping_url = config.WEB_SCRAPING_URL
+        self.data_extraction_url = config.DATA_EXTRACTION_URL
+        self.ollama_endpoint = config.OLLAMA_ENDPOINT
+        self.model_name = config.MODEL_NAME
+        self.max_iterations = config.MAX_ITERATIONS
+        self.urls_per_iteration = config.URLS_PER_ITERATION
+        
+        logger.info(f"🔧 Analysis Agent 配置:")
+        logger.info(f"   - 最大迭代次數: {self.max_iterations}")
+        logger.info(f"   - 每次爬取 URL 數: {self.urls_per_iteration}")
+        logger.info(f"   - Ollama 模型: {self.model_name}")
     
-    def _query_ollama(self, prompt: str, temperature: float = 0.3) -> str:
+    def _query_ollama(self, prompt: str, temperature: float = None) -> str:
         """
         呼叫 Ollama API
         """
+        if temperature is None:
+            temperature = config.OLLAMA_TEMPERATURE
+            
         try:
             response = requests.post(
                 f"{self.ollama_endpoint}/api/generate",
@@ -34,7 +44,7 @@ class AnalysisAgent:
                     "temperature": temperature,
                     "stream": False
                 },
-                timeout=60
+                timeout=config.OLLAMA_TIMEOUT
             )
             response.raise_for_status()
             result = response.json()
@@ -105,6 +115,7 @@ class AnalysisAgent:
             result = json.loads(llm_response)
             
             logger.info(f"🤖 LLM 判斷結果:")
+            logger.info(f"   充足度: {' 充足' if result.get('is_sufficient') else ' 不足'}")
 
             logger.info(f"   原因: {result.get('reason', 'N/A')}")
             if result.get('missing_aspects'):
@@ -133,8 +144,11 @@ class AnalysisAgent:
         entity_count = len(entities)
         rel_count = len(relationships)
         
-        # 簡單規則：至少 5 個實體和 3 個關係
-        is_sufficient = entity_count >= 5 and rel_count >= 3
+        # 使用配置的閾值
+        is_sufficient = (
+            entity_count >= config.MIN_ENTITIES_FALLBACK and 
+            rel_count >= config.MIN_RELATIONSHIPS_FALLBACK
+        )
         coverage_score = min(100, (entity_count * 10 + rel_count * 15))
         
         return {
@@ -183,36 +197,48 @@ class AnalysisAgent:
         
         return "\n".join(summary_lines)
     
-    def _generate_search_queries(self, query: str, missing_aspects: List[str]) -> List[str]:
+    def _generate_focused_query(self, query: str, missing_aspects: List[str], iteration: int) -> str:
         """
-        根據缺少的面向生成新的搜尋查詢
+        根據缺少的面向生成單一聚焦的搜尋查詢
+        
+        每次迭代只生成一個最重要的查詢，避免過度爬取
         """
         if not missing_aspects:
-            return [query]
+            return query
         
-        prompt = f"""基於以下資訊，生成 2-3 個更具體的搜尋查詢來補充缺少的資訊。
+        # 簡化版：直接結合原查詢和第一個缺少的面向
+        focused_aspect = missing_aspects[0] if missing_aspects else ""
+        
+        prompt = f"""基於以下資訊，生成一個精確的搜尋查詢來補充缺少的資訊。
 
 原始查詢: {query}
-缺少的面向: {', '.join(missing_aspects)}
+最需要補充的面向: {focused_aspect}
+當前迭代: {iteration + 1}
 
-請生成能夠找到這些缺少資訊的搜尋查詢。
-格式: 每行一個查詢，不要編號或其他標記。
-範例:
-台灣 AI 產業 供應鏈
-台灣 AI 晶片 市場規模
-台灣 AI 新創公司"""
+請生成一個結合原查詢和缺少面向的搜尋查詢。
+只需回傳查詢文字，不要其他說明。
+範例: 台灣 AI 產業 供應鏈分析"""
 
         try:
-            llm_response = self._query_ollama(prompt, temperature=0.7)
-            queries = [q.strip() for q in llm_response.split("\n") if q.strip()]
-            queries = queries[:3]  # 最多 3 個
+            llm_response = self._query_ollama(prompt, temperature=0.5)
+            # 取第一行作為查詢
+            generated_query = llm_response.split("\n")[0].strip()
             
-            logger.info(f"🔍 生成新搜尋查詢: {queries}")
-            return queries
+            # 移除可能的引號或標記
+            generated_query = generated_query.strip('"\'`')
+            
+            if len(generated_query) > 100 or len(generated_query) < 3:
+                # 如果生成的查詢不合理，使用簡單組合
+                logger.warning(f"⚠️ LLM 生成的查詢不合理: {generated_query}")
+                generated_query = f"{query} {focused_aspect}"
+            
+            logger.info(f"🔍 生成聚焦查詢: {generated_query}")
+            return generated_query
             
         except Exception as e:
-            logger.warning(f"⚠️ 生成搜尋查詢失敗: {e}")
-            return [query]
+            logger.warning(f"⚠️ 生成聚焦查詢失敗: {e}")
+            # 降級：簡單組合
+            return f"{query} {focused_aspect}" if focused_aspect else query
     
     async def orchestrate_workflow(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -264,20 +290,22 @@ class AnalysisAgent:
                 # ============ 步驟 4: 生成新搜尋查詢 ============
                 logger.info(f"📝 步驟 3: 生成補充搜尋查詢")
                 missing_aspects = sufficiency.get("missing_aspects", [])
-                search_queries = self._generate_search_queries(query, missing_aspects)
+                search_query = self._generate_focused_query(query, missing_aspects, iteration)
                 
-                # ============ 步驟 5: 搜尋 + 爬取 ============
+                # ============ 步驟 5: 單次搜尋 + 爬取 ============
                 logger.info(f"🔍 步驟 4: 執行搜尋和爬取")
-                for search_query in search_queries:
-                    logger.info(f"   搜尋: {search_query}")
-                    scraped_data = await self._search_and_scrape(search_query)
+                logger.info(f"   查詢: {search_query}")
+                
+                scraped_data = await self._search_and_scrape(search_query)
+                
+                if scraped_data.get("results"):
+                    all_scraped_results.extend(scraped_data.get("results", []))
                     
-                    if scraped_data.get("results"):
-                        all_scraped_results.extend(scraped_data.get("results", []))
-                        
-                        # ============ 步驟 6: 萃取並存入 Neo4j ============
-                        logger.info(f"   🔬 萃取資料並存入 Neo4j")
-                        await self._extract_data(query, scraped_data)
+                    # ============ 步驟 6: 萃取並存入 Neo4j ============
+                    logger.info(f"   🔬 萃取資料並存入 Neo4j")
+                    await self._extract_data(query, scraped_data)
+                else:
+                    logger.warning(f"   ⚠️ 本次迭代未找到新資料")
                 
                 iteration += 1
             
@@ -330,7 +358,7 @@ class AnalysisAgent:
     
     async def _search_and_scrape(self, query: str) -> Dict[str, Any]:
         """
-        使用 Tavily 搜尋並爬取網頁
+        使用 Tavily 搜尋並爬取網頁（限制數量）
         """
         try:
             response = requests.post(
@@ -338,14 +366,16 @@ class AnalysisAgent:
                 json={
                     "urls": [],
                     "query": query,
-                    "dynamic_search": True
+                    "dynamic_search": True,
+                    "max_results": self.urls_per_iteration  # 限制結果數量
                 },
                 timeout=60
             )
             response.raise_for_status()
             result = response.json()
             
-            logger.info(f"   ✅ 爬取完成: {result.get('successful', 0)} 個成功")
+            successful = result.get('successful', 0)
+            logger.info(f"   ✅ 爬取完成: {successful}/{self.urls_per_iteration} 個成功")
             return result
             
         except Exception as e:
